@@ -1,0 +1,6 @@
+{
+  "name": "MediaVault - Personal Media Cloud",
+  "description": "Self-hosted media management cloud with hardware-accelerated transcoding, local AI YOLOv8 object recognition, virtualized timeline, EXIF inspection, and private network integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

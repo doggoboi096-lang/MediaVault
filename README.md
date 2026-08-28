@@ -1,4 +1,7 @@
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/doggoboi096-lang/MediaVault-AIRiser2026)
+
+Lưu ý cho Ban Giám Khảo: Để bảo mật an toàn thông tin, dự án không đính kèm file .env trên GitHub. Khi môi trường Codespaces mở ra, vui lòng tạo một file .env (dựa trên cấu trúc của .env.example) và điền API Key Gemini của bạn vào để tính năng AI hoạt động.
+
 # 🚀 TỔNG QUAN DỰ ÁN: MEDIAVAULT
 
 **Định vị:** Nền tảng Đám mây Đa phương tiện Tự lưu trữ (High-Density Self-Hosted Media Cloud) tích hợp AI cục bộ và Mạng lưới Zero-Trust.

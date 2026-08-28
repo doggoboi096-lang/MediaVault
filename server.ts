@@ -188,34 +188,34 @@ async function startServer() {
   app.use('/media', express.static(mediaDir));
 
   // Sync / ensure existing converted JPEGs have embedded EXIF transferred from originals
-  (async () => {
-    const vaultDir = path.join(mediaDir, 'heic_originals');
-    if (!fs.existsSync(vaultDir)) return;
-    try {
-      const heicFiles = fs.readdirSync(vaultDir);
-      for (const hf of heicFiles) {
-        const heicPath = path.join(vaultDir, hf);
-        const baseName = hf.replace(/^\d+-/, '').replace(/\.(heic|heif)$/i, '');
-        const jpgFiles = fs.readdirSync(mediaDir).filter(f => f.includes(baseName) && f.endsWith('.jpg'));
-        for (const jf of jpgFiles) {
-          const jpgPath = path.join(mediaDir, jf);
-          try {
-            const parsed = await exifr.parse(jpgPath, { tiff: true }).catch(() => null);
-            if (!parsed || !parsed.Make) {
-              console.log(`[HEIC-SYNC] Injecting EXIF into ${jf} from ${hf}...`);
-              const upgradedJpg = await convertHeicToJpegWithExif(heicPath, 0.88);
-              fs.writeFileSync(jpgPath, upgradedJpg);
-              console.log(`[HEIC-SYNC] Successfully injected EXIF into ${jf}`);
-            }
-          } catch (e) {
-            // ignore
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[HEIC-SYNC] Error syncing existing HEIC EXIF:', e);
-    }
-  })();
+  // (async () => {
+  //   const vaultDir = path.join(mediaDir, 'heic_originals');
+  //   if (!fs.existsSync(vaultDir)) return;
+  //   try {
+  //     const heicFiles = fs.readdirSync(vaultDir);
+  //     for (const hf of heicFiles) {
+  //       const heicPath = path.join(vaultDir, hf);
+  //       const baseName = hf.replace(/^\d+-/, '').replace(/\.(heic|heif)$/i, '');
+  //       const jpgFiles = fs.readdirSync(mediaDir).filter(f => f.includes(baseName) && f.endsWith('.jpg'));
+  //       for (const jf of jpgFiles) {
+  //         const jpgPath = path.join(mediaDir, jf);
+  //         try {
+  //           const parsed = await exifr.parse(jpgPath, { tiff: true }).catch(() => null);
+  //           if (!parsed || !parsed.Make) {
+  //             console.log(`[HEIC-SYNC] Injecting EXIF into ${jf} from ${hf}...`);
+  //             const upgradedJpg = await convertHeicToJpegWithExif(heicPath, 0.88);
+  //             fs.writeFileSync(jpgPath, upgradedJpg);
+  //             console.log(`[HEIC-SYNC] Successfully injected EXIF into ${jf}`);
+  //           }
+  //         } catch (e) {
+  //           // ignore
+  //         }
+  //       }
+  //     }
+  //   } catch (e) {
+  //     console.warn('[HEIC-SYNC] Error syncing existing HEIC EXIF:', e);
+  //   }
+  // })();
 
   const storage = multer.diskStorage({
     destination: (req, file, cb) => {

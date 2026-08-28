@@ -1,3 +1,4 @@
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/doggoboi096-lang/MediaVault-AIRiser2026)
 # 🚀 TỔNG QUAN DỰ ÁN: MEDIAVAULT
 
 **Định vị:** Nền tảng Đám mây Đa phương tiện Tự lưu trữ (High-Density Self-Hosted Media Cloud) tích hợp AI cục bộ và Mạng lưới Zero-Trust.

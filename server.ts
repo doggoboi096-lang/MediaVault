@@ -5,11 +5,14 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { exec, execSync } from 'child_process';
+import util from 'util';
+import ffmpegPath from 'ffmpeg-static';
+import ffprobeStatic from 'ffprobe-static';
 import multer from 'multer';
 import exifr from 'exifr';
 import { createServer as createViteServer } from 'vite';
 import { INITIAL_MEDIA } from './src/data/mockMedia';
-import { GoogleGenAI, Type } from "@google/genai";
+import { analyzeMediaHybrid } from './src/services/local_ai.ts';
 
 // Patch exifr parser limitation for modern HEIF/HEIC/AVIF files with header > 50 bytes
 try {
@@ -153,20 +156,7 @@ export async function convertHeicToJpegWithExif(heicBufferOrPath: Buffer | strin
   return Buffer.from(rawJpg);
 }
 
-let aiClient: GoogleGenAI | null = null;
-function getAi(): GoogleGenAI {
-  if (!aiClient) {
-    aiClient = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
-  }
-  return aiClient;
-}
+
 
 
 
@@ -521,106 +511,7 @@ async function startServer() {
     const filenames = req.files.map(f => f.filename);
     res.json({ success: true, filenames });
   });
-  async function runAIModels(base64Data: string, mimeType: string, ai: any, aiProcessLogs: string[]) {
-    let response: any = null;
-    const AI_MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.7-flash', 'gemini-3.6-flash'];
-    let lastError: any = null;
 
-    for (const model of AI_MODELS) {
-      try {
-        console.log(`Attempting AI analysis with model: ${model}`);
-        aiProcessLogs.push(`[INIT] Attempting analysis with ${model}...`);
-        const resPromise = ai.models.generateContent({
-          model: model,
-          contents: {
-            parts: [
-              { text: 'You are a strict visual image classifier. Analyze ONLY the VISUAL CONTENT of this image. Ignore any file structure, binary, hex, or metadata anomalies. Output descriptive tags of the physical subjects, animals, objects, or scenery visible (e.g., "cat", "animal", "street", "food"). ABSOLUTELY DO NOT output tags related to digital formats like "binary", "data", "hexadecimal", "text", or "smartphone". Type must be one of: "image", "document", or "id_card". If the image is a simple photograph, ignore any complex formatting or structure and output simple visual subject tags.' },
-              { inlineData: { data: base64Data, mimeType: mimeType } }
-            ]
-          },
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                type: { type: Type.STRING, description: "Must be 'image', 'document', or 'id_card'" },
-                detectedObjects: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      label: { type: Type.STRING },
-                      confidence: { type: Type.NUMBER },
-                      category: { type: Type.STRING }
-                    }
-                  }
-                },
-                ocrData: {
-                  type: Type.OBJECT,
-                  properties: {
-                    extractedText: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    documentType: { type: Type.STRING }
-                  }
-                },
-                exif: {
-                  type: Type.OBJECT,
-                  properties: {
-                    camera: { type: Type.STRING, nullable: true },
-                    lens: { type: Type.STRING, nullable: true },
-                    aperture: { type: Type.STRING, nullable: true },
-                    shutter: { type: Type.STRING, nullable: true },
-                    iso: { type: Type.INTEGER, nullable: true }
-                  }
-                }
-              }
-            }
-          }
-        });
-
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout on model ${model}`)), 30000)
-        );
-
-        response = await Promise.race([resPromise, timeoutPromise]);
-        if (response && response.text) {
-          console.log(`AI analysis succeeded with model: ${model}`);
-          aiProcessLogs.push(`[SUCCESS] ${model} extracted tags successfully.`);
-          break;
-        }
-      } catch (modelErr: any) {
-        console.error(`AI model ${model} error:`, modelErr?.message || modelErr);
-        aiProcessLogs.push(`[WARN] ${model} failed: ${modelErr?.message}. Falling back...`);
-        lastError = modelErr;
-      }
-    }
-
-    if (!response) {
-      throw lastError || new Error('All AI models failed');
-    }
-
-    let metadata: any = {};
-    try {
-      let responseText = response?.text || '{}';
-      let cleanText = responseText.replace(/```json/gi, '').replace(/```/gi, '').trim();
-      const firstBrace = cleanText.indexOf('{');
-      const lastBrace = cleanText.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace !== -1) {
-        cleanText = cleanText.substring(firstBrace, lastBrace + 1);
-      }
-      metadata = JSON.parse(cleanText);
-    } catch (parseErr) {
-      console.error('Failed to parse AI response JSON:', parseErr);
-      metadata = {
-        tags: ['uploaded'],
-        type: 'image',
-        detectedObjects: [],
-        ocrData: { extractedText: [], documentType: '' },
-        exif: { camera: '', lens: '', aperture: '', shutter: '', iso: 0 }
-      };
-    }
-    return metadata;
-  }
 
   app.post('/api/analyze-media', upload.array('files'), async (req, res) => {
     if (!req.files || !Array.isArray(req.files) || req.files.length === 0) {
@@ -639,17 +530,18 @@ async function startServer() {
       const isVideo = file.mimetype?.startsWith('video') || ['.mp4', '.mov', '.webm', '.avi'].includes(originalExt);
       let mimeType = file.mimetype || 'image/jpeg';
 
-      let realExif: any = null;
+      let realExif: any = {};
       let videoMeta: any = undefined;
       if (!isVideo) {
         try {
-          realExif = await exifr.parse(filePath, { tiff: true, xmp: true, icc: true, gps: true });
+          realExif = await exifr.parse(filePath, { tiff: true, xmp: true, icc: true, gps: true }) || {};
         } catch (e) {
-          console.warn('EXIF parse error:', e);
+          console.warn(`EXIF parse error (${originalExt} may not support EXIF):`, (e as any)?.message);
+          realExif = {};
         }
       } else {
         try {
-          const ffprobeRaw = execSync(`ffprobe -v quiet -print_format json -show_format -show_streams "${filePath}"`).toString();
+          const ffprobeRaw = execSync(`"${ffprobeStatic.path}" -v quiet -print_format json -show_format -show_streams "${filePath}"`).toString();
           const ffprobeData = JSON.parse(ffprobeRaw);
 
           const tags = { ...(ffprobeData?.streams?.[0]?.tags || {}), ...(ffprobeData?.format?.tags || {}) };
@@ -796,39 +688,70 @@ async function startServer() {
           base64Data = fs.readFileSync(filePath).toString('base64');
         } else {
           try {
+            const execAsync = util.promisify(exec);
             try {
               // Try extracting at 1 second
-              execSync(`ffmpeg -y -ss 00:00:01 -i "${filePath}" -vframes 1 "${tempFramePath}"`);
+              await execAsync(`"${ffmpegPath}" -y -ss 00:00:01 -i "${filePath}" -vframes 1 "${tempFramePath}"`);
             } catch (err) {
               // Fallback to 0 seconds if video is too short
-              execSync(`ffmpeg -y -ss 00:00:00 -i "${filePath}" -vframes 1 "${tempFramePath}"`);
+              await execAsync(`"${ffmpegPath}" -y -ss 00:00:00 -i "${filePath}" -vframes 1 "${tempFramePath}"`);
             }
             if (fs.existsSync(tempFramePath)) {
-              tempFrameCreated = true;
-              base64Data = fs.readFileSync(tempFramePath).toString('base64');
-              mimeType = 'image/jpeg';
-              previewUrl = '/media_uploads/' + path.basename(tempFramePath);
+              const stat = fs.statSync(tempFramePath);
+              console.log(`[FFmpeg] Frame extracted: ${tempFramePath} (${stat.size} bytes)`);
+              if (stat.size > 0) {
+                tempFrameCreated = true;
+                const buffer = await fs.promises.readFile(tempFramePath);
+                base64Data = buffer.toString('base64');
+                console.log(`[FFmpeg→AI] Buffer ready: ${buffer.length} bytes, base64 length: ${base64Data.length}`);
+                mimeType = 'image/jpeg';
+                previewUrl = '/media_uploads/' + path.basename(tempFramePath);
+              } else {
+                console.warn('[FFmpeg] Frame file exists but is 0 bytes — FFmpeg may have failed silently.');
+              }
+            } else {
+              console.warn('[FFmpeg] Frame file does not exist after extraction:', tempFramePath);
             }
           } catch (ffmpegErr: any) {
-            console.warn('Could not extract video frame via FFmpeg');
+            console.error('[FFmpeg] Frame extraction failed:', ffmpegErr?.message);
           }
         }
 
-        const ai = getAi();
         let metadata: any = {
           tags: ['uploaded'],
           type: isVideo ? 'video' : 'image',
           detectedObjects: [],
-          ocrData: { extractedText: [], documentType: '' },
+          ocrText: '',
           exif: { camera: '', lens: '', aperture: '', shutter: '', iso: 0 }
         };
 
-        if (base64Data.trim() !== '') {
-          try {
-            metadata = await runAIModels(base64Data, mimeType, ai, aiProcessLogs);
-          } catch (aiErr: any) {
-            console.warn('All AI models failed, using fallback metadata');
+        // Hybrid AI: Ollama Qwen-VL (vision)
+        const analysisImagePath = tempFrameCreated ? tempFramePath : filePath;
+        try {
+          if (isVideo && !base64Data) {
+            console.warn('[AI] Skipping vision analysis for video — no frame data available.');
+          } else {
+            console.log(`[AI] Sending to analyzeMediaHybrid: isVideo=${isVideo}, base64 length=${base64Data.length}, path=${analysisImagePath}`);
+            const hybridResult = await analyzeMediaHybrid(analysisImagePath, base64Data);
+            metadata.detectedObjects = hybridResult.detectedObjects;
+            metadata.tags = hybridResult.tags;
+            metadata.type = isVideo ? 'video' : hybridResult.type;
+            if (hybridResult.ocrText && hybridResult.ocrText.length > 0) {
+              metadata.ocrText = hybridResult.ocrText;
+              metadata.ocr = hybridResult.ocrText;
+              metadata.ocrData = {
+                documentType: 'Note',
+                extractedText: hybridResult.ocrText.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0)
+              };
+            }
+            aiProcessLogs.push(`[QWEN-VL] Vision engine detected ${hybridResult.detectedObjects.length} objects and extracted OCR text.`);
           }
+        } catch (aiErr: any) {
+          console.warn('Hybrid AI analysis failed, using fallback metadata:', aiErr?.message);
+        }
+
+        if (tempFrameCreated && fs.existsSync(tempFramePath)) {
+          fs.promises.unlink(tempFramePath).catch(e => console.warn('Failed to cleanup temp frame:', e));
         }
 
         const forbiddenTags = ['binary', 'data', 'hexadecimal', 'text', 'code', 'smartphone', 'digital', 'format', 'noise', 'artifact', 'corruption', 'error', 'glitch'];
@@ -851,6 +774,8 @@ async function startServer() {
           type: isVideo ? 'video' : (metadata.type || 'image'),
           tags: metadata.tags || ['uploaded'],
           detectedObjects: metadata.detectedObjects || [],
+          ocrText: metadata.ocrText,
+          ocr: metadata.ocrText,
           ocrData: metadata.ocrData,
           exifData: realExif,
           exif: formattedExif,
@@ -867,7 +792,7 @@ async function startServer() {
         processedItems.push(newItem);
 
       } catch (err: any) {
-        console.warn('Gemini fallback triggered:', err?.message || err);
+        console.warn('AI analysis fallback triggered:', err?.message || err);
         const formattedExif = formatExifData(realExif, { size: file.size } as fs.Stats, isHeic ? 'HEIC' : (file.originalname.split('.').pop() || 'JPEG'), dateInfo.dateTaken);
 
         const newItem = {
@@ -886,7 +811,7 @@ async function startServer() {
           type: isVideo ? 'video' : 'image',
           tags: ['image', 'photo'],
           detectedObjects: [],
-          ocrData: { extractedText: [], documentType: '' },
+          ocrText: '',
           exifData: realExif,
           exif: formattedExif,
           orientation: realExif?.Orientation || 1,

@@ -72,6 +72,8 @@ export interface MediaItem {
   detectedObjects: DetectedObject[];
   videoMeta?: VideoMetadata;
   ocrData?: DocumentOcrData;
+  ocrText?: string;
+  ocr?: string;
   isFavorite?: boolean;
   collection?: string;
   isDeleted?: boolean;

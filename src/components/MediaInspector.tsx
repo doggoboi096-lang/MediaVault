@@ -100,8 +100,9 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   };
 
   const handleCopyOcr = () => {
-    if (localItem?.ocrData?.extractedText && Array.isArray(localItem.ocrData.extractedText)) {
-      navigator.clipboard.writeText(localItem.ocrData.extractedText.join('\n'));
+    const ocrStr = localItem?.ocrText || localItem?.ocr || '';
+    if (ocrStr) {
+      navigator.clipboard.writeText(ocrStr);
       setCopiedOcr(true);
       setTimeout(() => setCopiedOcr(false), 2000);
     }
@@ -122,7 +123,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   const isVideo = localItem?.type === 'video';
   const tags = Array.isArray(localItem?.tags) ? localItem.tags : [];
   const detectedObjects = Array.isArray(localItem?.detectedObjects) ? localItem.detectedObjects : [];
-  const ocrLines = Array.isArray(localItem?.ocrData?.extractedText) ? localItem.ocrData.extractedText : [];
+  const ocrTextStr = localItem?.ocrText || localItem?.ocr || '';
   const location = localItem?.location;
   const exif = localItem?.exif || {};
   const videoMeta = localItem?.videoMeta;
@@ -587,7 +588,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-400">
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>{t('aiMetadata')}</span>
+                    <span>QWEN-VL VISION ENGINE</span>
                   </div>
                   <span className="text-[10px] text-emerald-400 font-mono">14.2ms ONNX</span>
                 </div>
@@ -617,12 +618,12 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
             )}
 
             {/* OCR Extracted Text */}
-            {ocrLines.length > 0 && (
+            {ocrTextStr && (
               <div className="space-y-2.5 pt-2 border-t border-zinc-800">
                 <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-400">
                   <div className="flex items-center gap-2">
                     <FileText className="w-3.5 h-3.5 text-amber-400" />
-                    <span>PaddleOCR Text Engine</span>
+                    <span>QWEN-VL OCR</span>
                   </div>
                   <button
                     onClick={handleCopyOcr}
@@ -633,10 +634,8 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   </button>
                 </div>
 
-                <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800 font-mono text-[10px] text-zinc-300 space-y-1 max-h-36 overflow-y-auto">
-                  {ocrLines.map((line, idx) => (
-                    <p key={idx} className="leading-relaxed">{line}</p>
-                  ))}
+                <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800 font-mono text-[10px] text-zinc-300 space-y-1 max-h-36 overflow-y-auto whitespace-pre-wrap">
+                  {ocrTextStr}
                 </div>
               </div>
             )}

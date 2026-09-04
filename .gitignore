@@ -13,3 +13,22 @@ coverage/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# ONNX models (downloaded at setup)
+models/*.onnx
+
+# Media uploads & local test data
+media_uploads/
+*.jpeg
+*.jpg
+*.png
+*.webp
+
+# Local generated index/metadata (nếu chỉ dùng cho máy local)
+library_index.json
+trash_index.json
+metadata.json
+
+# Archive & docs
+*.zip
+*.docx

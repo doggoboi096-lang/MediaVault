@@ -11,11 +11,67 @@ Lần chạy đầu tiên, server tự tải về (khoảng 3 GB, chỉ tải m�
 * `llama-server` bản chính thức từ [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp/releases) vào `.ai_runtime/` (Windows dùng bản Vulkan, chạy được trên GPU NVIDIA/AMD/Intel).
 * Model `Qwen3VL-4B-Instruct-Q4_K_M.gguf` (2.5 GB) và `mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf` (0.45 GB) từ [Qwen/Qwen3-VL-4B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF) vào `models/`.
 
-Các lần sau, model được nạp thẳng từ ổ đĩa vào GPU mỗi khi chạy `npm run dev`. Tiến trình tải/nạp hiển thị trong terminal và tại `GET /api/health` (trường `ai`). Ảnh upload trong lúc model đang nạp sẽ chờ đến khi AI sẵn sàng. Nếu AI lỗi, ảnh vẫn được lưu và đọc EXIF/GPS bình thường, chỉ thiếu tag AI và OCR.
+Các lần sau, model được nạp thẳng từ ổ đĩa vào GPU mỗi khi chạy `npm run dev`. Tiến trình tải/nạp hiển thị trong terminal và tại `GET /api/system` (trường `ai`, cần đăng nhập). Ảnh upload trong lúc model đang nạp sẽ chờ đến khi AI sẵn sàng. Nếu AI lỗi, ảnh vẫn được lưu và đọc EXIF/GPS bình thường, chỉ thiếu tag AI và OCR.
 
 Trên máy có nhiều GPU (ví dụ laptop có cả iGPU), server tự chọn GPU rời và chạy toàn bộ model trên GPU đó; có thể chỉ định thủ công bằng `AI_DEVICE` (ví dụ `AI_DEVICE=Vulkan0`, xem danh sách bằng `llama-server --list-devices`).
 
 Tùy chọn trong `.env`: `LLAMA_BACKEND=cpu` (ép chạy CPU; Linux mặc định CPU, đặt `vulkan` để dùng GPU), `AI_PORT` (mặc định `8089`), `AI_MODEL_FILE` / `AI_MMPROJ_FILE` (đổi bản lượng tử hóa, ví dụ `Qwen3VL-4B-Instruct-Q8_0.gguf`), `LLAMA_SERVER_PATH` (dùng `llama-server` có sẵn), hoặc `AI_BASE_URL` (trỏ tới một server OpenAI-compatible đang chạy sẵn thay vì tự khởi động).
+
+## 🔒 Bảo mật & truy cập từ xa
+
+Chỉ **chủ sở hữu** mới vào được MediaVault, và chỉ qua đúng một đường:
+
+```
+Thiết bị của bạn ──(Tailscale, mã hoá)──▶ tailscale serve (HTTPS *.ts.net) ──▶ 127.0.0.1:3000 (MediaVault)
+```
+
+* Server chỉ lắng nghe trên `127.0.0.1`. Máy khác trong cùng Wi-Fi không kết nối được.
+* Mọi API và mọi file ảnh (`/api/*`, `/media/*`) đều cần session của chủ sở hữu. Session được cấp sau khi đăng nhập Google đúng email trong `ALLOWED_EMAIL`, lưu trong cookie `mv_session` (`HttpOnly`, `Secure`, `SameSite=Strict`).
+* Request đi qua `tailscale serve` phải đến từ đúng tài khoản Tailscale trong `ALLOWED_TAILSCALE_LOGIN`.
+* Xoá ảnh chỉ xoá bản lưu trong `media_uploads/`. Ảnh từ thư mục đã quét chỉ bị gỡ khỏi index, file gốc trên ổ đĩa không bao giờ bị xoá. Mọi lần xoá được ghi vào `logs/audit.log`.
+
+### 1. Cấu hình `.env`
+
+Sao chép `.env.example` thành `.env` rồi điền:
+
+| Biến | Ý nghĩa |
+|---|---|
+| `ALLOWED_EMAIL` | Email Google duy nhất được đăng nhập |
+| `ALLOWED_TAILSCALE_LOGIN` | Tài khoản Tailscale được phép (thường trùng email trên) |
+| `FIREBASE_PROJECT_ID` | Project Firebase dùng để kiểm tra ID token (`mediavault-2b811`). Không cần file service account |
+| `SESSION_SECRET` | Để trống thì server tự sinh và lưu ở `.ai_runtime/session.key` |
+| `SESSION_DAYS` | Thời hạn session (mặc định 30 ngày) |
+| `SESSION_VERSION` | Tăng số này để đăng xuất khỏi mọi thiết bị |
+| `HOST` / `PORT` | Mặc định `127.0.0.1` / `3000` |
+| `AUTH_DISABLED` | `true` để chạy demo không cần đăng nhập. Server **từ chối khởi động** nếu bật cùng `HOST` khác localhost |
+
+### 2. Mở truy cập từ xa bằng Tailscale (làm một lần trên máy chủ)
+
+```bash
+tailscale serve --bg 3000
+```
+
+```bash
+tailscale serve status
+```
+
+Sau đó mở `https://<tên-máy>.<tailnet>.ts.net` từ điện thoại hoặc máy khác đã đăng nhập Tailscale.
+
+### 3. Thêm tên miền vào Firebase
+
+Trong [Firebase Console](https://console.firebase.google.com/) → project `mediavault-2b811` → **Authentication → Settings → Authorized domains**, thêm tên miền `<tên-máy>.<tailnet>.ts.net`. Nếu thiếu bước này, cửa sổ đăng nhập Google sẽ báo lỗi khi mở qua Tailscale.
+
+### 4. Kiểm thử bảo mật
+
+```bash
+npm run test:security
+```
+
+Script tự dựng một server riêng (cổng 3191, thư mục dữ liệu tạm, AI tắt) và kiểm tra: không truy cập được qua IP LAN, API/ảnh trả 401 khi chưa đăng nhập, `/api/serve-media` đã bị xoá, chặn path traversal khi xoá, giới hạn 10 lần đăng nhập / 15 phút, upload không có session không ghi file, `AUTH_DISABLED` với `HOST` công khai bị từ chối, và xoá ảnh đã quét không đụng file gốc. Hai mục cần kiểm tra tay: đăng nhập bằng đúng tài khoản Google, và truy cập qua `https://…ts.net` từ điện thoại.
+
+### Chạy demo trên Codespaces
+
+Codespaces đặt sẵn `AUTH_DISABLED=true` (xem `.devcontainer/devcontainer.json`) để Ban Giám Khảo dùng thử mà không cần tài khoản Google của chủ sở hữu. Cổng chuyển tiếp của Codespaces là riêng tư theo mặc định, và server vẫn chỉ lắng nghe trên `127.0.0.1` bên trong container.
 
 # 🚀 TỔNG QUAN DỰ ÁN: MEDIAVAULT
 

@@ -1191,7 +1191,8 @@ async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      // HMR_PORT lets a second instance (e.g. the security check) run beside the normal dev server.
+      server: { middlewareMode: true, ...(process.env.HMR_PORT ? { hmr: { port: Number(process.env.HMR_PORT) } } : {}) },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1206,7 +1207,10 @@ async function startServer() {
   app.listen(PORT, HOST, () => {
     console.log(`MediaVault server listening at http://${HOST}:${PORT}`);
     // Boot the local AI runtime in the background; uploads wait for it via analyzeMediaHybrid.
-    startAiRuntime().catch(() => { /* status already logged; retried on next upload */ });
+    // AI_AUTOSTART=false defers it to the first upload.
+    if (process.env.AI_AUTOSTART !== 'false') {
+      startAiRuntime().catch(() => { /* status already logged; retried on next upload */ });
+    }
   });
 }
 

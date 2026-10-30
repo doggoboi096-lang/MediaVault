@@ -33,3 +33,6 @@ metadata.json
 # Archive & docs
 *.zip
 *.docx
+# Server logs & registered library folders
+logs/
+library_roots.json

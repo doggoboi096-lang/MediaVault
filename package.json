@@ -9,12 +9,14 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test:security": "tsx scripts/security-check.ts"
+    "test:security": "tsx scripts/security-check.ts",
+    "db:migrate": "tsx scripts/migrate-db.ts"
   },
   "dependencies": {
     "@fontsource/be-vietnam-pro": "^5.3.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
+    "better-sqlite3": "^13.0.3",
     "canvas-confetti": "^1.9.4",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
@@ -38,6 +40,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/canvas-confetti": "^1.9.0",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^4.17.21",

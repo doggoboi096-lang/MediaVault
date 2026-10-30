@@ -230,7 +230,7 @@ async function main() {
       headers: { Cookie: cookie, 'Content-Type': 'application/json' },
       body: JSON.stringify({ item: { filename: 'sample.png', path: path.join(ROOT, 'package.json'), url: '/evil', description: 'ok' } }),
     });
-    const indexed = JSON.parse(fs.readFileSync(path.join(dataDir, 'library_index.json'), 'utf8')).find((i: any) => i.filename === 'sample.png');
+    const indexed = ((await (await fetch(`${BASE}/api/media`, authed)).json()).data as any[]).find(i => i.filename === 'sample.png');
     record('F', 'PATCH không sửa được path/url', patch.status === 200 && indexed?.path === path.join(dataDir, 'media_uploads', 'sample.png') && indexed?.url === '/media/sample.png', `path ${indexed?.path?.endsWith('sample.png') ? 'giữ nguyên' : 'BỊ ĐỔI'}, url ${indexed?.url}`);
   } finally {
     server.child.kill();

@@ -12,12 +12,27 @@ import ffprobeStatic from 'ffprobe-static';
 import multer from 'multer';
 import exifr from 'exifr';
 import { createServer as createViteServer } from 'vite';
-import { INITIAL_MEDIA } from './src/data/mockMedia';
 import { analyzeMediaHybrid } from './src/services/local_ai.ts';
 import { startAiRuntime, aiStatus } from './src/services/ai_runtime.ts';
 import { authRouter, checkAuthConfig, requireAuth } from './src/server/auth.ts';
 import { PathError, isInside, safeFilename, sanitizeUploadName, validateLibraryRoot } from './src/server/safePath.ts';
 import { audit, configureAudit } from './src/server/audit.ts';
+import {
+  addLibraryRoot,
+  findDuplicate,
+  getLibraryRoots,
+  getMedia,
+  getMediaByFilename,
+  getMediaByPath,
+  insertMedia,
+  listMedia,
+  openDatabase,
+  removeMedia,
+  setDeleted,
+  trashedFilenames,
+  updateMedia,
+} from './src/server/db.ts';
+import { hasAiResults, migrateLegacyJson } from './src/server/migrate.ts';
 
 // Patch exifr parser limitation for modern HEIF/HEIC/AVIF files with header > 50 bytes
 try {
@@ -166,6 +181,63 @@ export async function convertHeicToJpegWithExif(heicBufferOrPath: Buffer | strin
 
 
 
+const SUPPORTED_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.webm', '.heic', '.webp'];
+const VIDEO_EXTS = ['.mp4', '.mov', '.webm'];
+
+/**
+ * Brings media_uploads and the database in line at startup: files dropped into the folder
+ * by hand are registered (AI pending), and uploads whose file is gone are removed.
+ * Scanned items are left alone even if their drive is offline.
+ */
+async function syncUploadsFolder(mediaDir: string) {
+  const missing = listMedia()
+    .filter(i => isInside(i.path, mediaDir) && !fs.existsSync(i.path))
+    .map(i => i.filename);
+  if (missing.length) {
+    removeMedia(missing);
+    console.log(`[DB] Removed ${missing.length} uploads whose file no longer exists`);
+  }
+
+  let added = 0;
+  for (const file of fs.readdirSync(mediaDir)) {
+    const ext = path.extname(file).toLowerCase();
+    const filePath = path.join(mediaDir, file);
+    if (!SUPPORTED_EXTS.includes(ext) || getMediaByFilename(file) || !fs.statSync(filePath).isFile()) continue;
+    const isVideo = VIDEO_EXTS.includes(ext);
+    const stat = fs.statSync(filePath);
+    let realExif: any = {};
+    if (!isVideo) {
+      realExif = (await exifr.parse(filePath, { tiff: true, xmp: true, icc: true, gps: true }).catch(() => null)) || {};
+    }
+    const dateInfo = extractRealDate(realExif, stat);
+    const id = `upload-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+    insertMedia(
+      {
+        id,
+        title: file,
+        filename: file,
+        path: filePath,
+        url: `/media/${file}`,
+        thumbnailUrl: `/media/${file}`,
+        type: isVideo ? 'video' : 'image',
+        date: dateInfo.date,
+        dateFormatted: dateInfo.dateFormatted,
+        exif: formatExifData(realExif, stat, ext, dateInfo.dateTaken) as any,
+        location:
+          realExif.latitude && realExif.longitude
+            ? { name: 'GPS Location', city: '', country: '', latitude: realExif.latitude, longitude: realExif.longitude }
+            : undefined,
+        tags: [],
+        detectedObjects: [],
+        originalSize: stat.size,
+      },
+      { source: 'upload', aiStatus: 'pending' }
+    );
+    added++;
+  }
+  if (added) console.log(`[DB] Registered ${added} files found in media_uploads`);
+}
+
 /**
  * Keeps data out of the dev server: Vite serves any file under the project root
  * (and /@fs/ paths), which would expose uploads, indexes, logs and keys without a session.
@@ -187,8 +259,11 @@ function blockPrivateFiles(dataDir: string): express.RequestHandler {
     const abs = p.startsWith('/@fs/')
       ? path.resolve(p.slice(4).replace(/^\/([A-Za-z]:)/, '$1'))
       : path.resolve(projectRoot, '.' + path.posix.normalize(p));
+    const base = path.basename(abs).toLowerCase();
     const blocked =
-      path.basename(abs).toLowerCase().startsWith('.env') ||
+      base.startsWith('.env') ||
+      // Legacy JSON stores and their .bak copies left by the SQLite migration
+      ['library_index.json', 'trash_index.json', 'library_roots.json'].some(n => base.startsWith(n)) ||
       privatePaths.some(priv => same(abs, priv) || isInside(abs, priv));
     if (blocked) return res.status(404).end();
     next();
@@ -204,17 +279,18 @@ async function startServer() {
   // Trust X-Forwarded-For only from the local proxy (tailscale serve), so rate limits see the real client.
   app.set('trust proxy', 'loopback');
 
-  // Directories & index paths
+  // Directories & database
   const DATA_DIR = path.resolve(process.env.DATA_DIR || process.cwd());
   const mediaDir = path.join(DATA_DIR, 'media_uploads');
-  const INDEX_FILE = path.join(DATA_DIR, 'library_index.json');
-  const TRASH_FILE = path.join(DATA_DIR, 'trash_index.json');
-  const ROOTS_FILE = path.join(DATA_DIR, 'library_roots.json');
   configureAudit(DATA_DIR);
 
   if (!fs.existsSync(mediaDir)) {
     fs.mkdirSync(mediaDir, { recursive: true });
   }
+
+  openDatabase(DATA_DIR);
+  migrateLegacyJson(DATA_DIR, mediaDir);
+  await syncUploadsFolder(mediaDir);
 
   // ── Access control ────────────────────────────────────────────────────────
   // Public: the auth endpoints, a bare health check and the SPA shell (login screen).
@@ -270,23 +346,6 @@ async function startServer() {
   });
   const upload = multer({ storage });
 
-  // Folders registered through the library scanner; files inside them may be served but never deleted.
-  const getLibraryRoots = (): string[] => {
-    try {
-      const roots = JSON.parse(fs.readFileSync(ROOTS_FILE, 'utf-8'));
-      return Array.isArray(roots) ? roots.filter((r: unknown) => typeof r === 'string') : [];
-    } catch {
-      return [];
-    }
-  };
-
-  const addLibraryRoot = (root: string) => {
-    const roots = getLibraryRoots();
-    if (!roots.some(r => path.resolve(r).toLowerCase() === path.resolve(root).toLowerCase())) {
-      fs.writeFileSync(ROOTS_FILE, JSON.stringify([...roots, root], null, 2));
-    }
-  };
-
   /** A file may be streamed only from media_uploads or a registered library folder. */
   const isServable = (filePath: string) =>
     isInside(filePath, mediaDir) || getLibraryRoots().some(root => isInside(filePath, root));
@@ -325,44 +384,6 @@ async function startServer() {
     } catch {
       res.status(400).json({ success: false, error: 'invalid filename' });
       return null;
-    }
-  };
-
-  const getLibraryIndex = (): any[] => {
-    if (fs.existsSync(INDEX_FILE)) {
-      try {
-        return JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8'));
-      } catch (e) {
-        console.error('Failed to parse library_index.json', e);
-      }
-    }
-    return [];
-  };
-
-  const saveLibraryIndex = (items: any[]) => {
-    try {
-      fs.writeFileSync(INDEX_FILE, JSON.stringify(items, null, 2));
-    } catch (e) {
-      console.error('Failed to write library_index.json', e);
-    }
-  };
-
-  const getTrashIndex = (): string[] => {
-    if (fs.existsSync(TRASH_FILE)) {
-      try {
-        return JSON.parse(fs.readFileSync(TRASH_FILE, 'utf-8'));
-      } catch (e) {
-        console.error('Failed to parse trash_index.json', e);
-      }
-    }
-    return [];
-  };
-
-  const saveTrashIndex = (arr: string[]) => {
-    try {
-      fs.writeFileSync(TRASH_FILE, JSON.stringify(arr, null, 2));
-    } catch (e) {
-      console.error('Failed to write trash_index.json', e);
     }
   };
 
@@ -454,7 +475,7 @@ async function startServer() {
 
   // Streams an indexed file (e.g. from a scanned library folder) after checking it is inside an allowed folder.
   app.get('/api/media/:id/file', (req, res) => {
-    const item = getLibraryIndex().find(i => i.id === req.params.id);
+    const item = getMedia(req.params.id);
     if (!item || typeof item.path !== 'string') return res.status(404).json({ success: false, error: 'Not found' });
     const filePath = path.resolve(item.path);
     if (!isServable(filePath) || !fs.existsSync(filePath)) {
@@ -463,139 +484,8 @@ async function startServer() {
     res.sendFile(filePath, { dotfiles: 'deny' });
   });
 
-  app.get('/api/media', async (req, res) => {
-    try {
-      let indexedItems = getLibraryIndex();
-      const trashedItems = getTrashIndex();
-
-      // Drop index entries whose file is gone. Scanned items live outside media_uploads, so check their own path.
-      let indexModified = false;
-      indexedItems = indexedItems.filter(item => {
-        const stored = typeof item.path === 'string' && isServable(path.resolve(item.path)) && fs.existsSync(item.path);
-        if (stored || fs.existsSync(path.join(mediaDir, item.filename))) return true;
-        indexModified = true;
-        return false;
-      });
-      // Older scans pointed at the removed /api/serve-media route.
-      indexedItems.forEach(item => {
-        if (typeof item.url === 'string' && item.url.startsWith('/api/serve-media')) {
-          item.url = item.thumbnailUrl = `/api/media/${item.id}/file`;
-          indexModified = true;
-        }
-      });
-      if (indexModified) saveLibraryIndex(indexedItems);
-
-      let mediaFiles: string[] = [];
-      if (fs.existsSync(mediaDir)) {
-        mediaFiles = fs.readdirSync(mediaDir);
-      }
-
-      if (mediaFiles.length === 0 && indexedItems.length === 0) {
-        return res.json({ success: true, data: INITIAL_MEDIA });
-      }
-
-      const supportedExts = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.webm', '.heic', '.webp'];
-      const filteredFiles = mediaFiles.filter(file => supportedExts.includes(path.extname(file).toLowerCase()));
-
-      const mediaItemsPromises = filteredFiles.map(async (file, index) => {
-        const ext = path.extname(file).toLowerCase();
-        const isVideo = ['.mp4', '.mov', '.webm'].includes(ext);
-        const filePath = path.join(mediaDir, file);
-        const stat = fs.statSync(filePath);
-
-        let realExif: any = {};
-        if (!isVideo) {
-          try {
-            realExif = await exifr.parse(filePath, { tiff: true, xmp: true, icc: true, gps: true }) || {};
-          } catch (e) {
-            // ignore
-          }
-        }
-
-        const dateInfo = extractRealDate(realExif, stat);
-        const formattedExif = formatExifData(realExif, stat, ext, dateInfo.dateTaken);
-
-        let lat = undefined;
-        let lng = undefined;
-        if (realExif.latitude && realExif.longitude) {
-          lat = realExif.latitude;
-          lng = realExif.longitude;
-        }
-
-        return {
-          id: `media-real-${index}-${stat.mtimeMs}`,
-          title: file,
-          filename: file,
-          path: filePath,
-          url: `/media/${file}`,
-          thumbnailUrl: `/media/${file}`,
-          type: isVideo ? 'video' : 'image',
-          date: dateInfo.date,
-          dateFormatted: dateInfo.dateFormatted,
-          exif: formattedExif,
-          location: lat && lng ? {
-            name: 'GPS Location',
-            city: '',
-            country: '',
-            latitude: lat,
-            longitude: lng
-          } : undefined,
-          tags: ['local', 'upload', isVideo ? 'video' : 'image'],
-          detectedObjects: [],
-          videoMeta: isVideo ? {
-            duration: '0:15',
-            durationSeconds: 15,
-            codec: 'HEVC (H.265)',
-            bitrate: '15 Mbps',
-            frameRate: 60,
-            audioCodec: 'AAC 320kbps',
-            hwTranscode: 'NVENC Active' as const
-          } : undefined,
-          isFavorite: false
-        };
-      });
-
-      const mediaItems = await Promise.all(mediaItemsPromises);
-      const allItemsMap = new Map<string, any>();
-
-      // Default items from directory scan
-      mediaItems.forEach(item => {
-        allItemsMap.set(item.filename, item);
-      });
-
-      // Merge indexed items giving priority to library_index.json data (AI tags, detections, edits)
-      indexedItems.forEach(item => {
-        if (allItemsMap.has(item.filename)) {
-          const existing = allItemsMap.get(item.filename);
-          allItemsMap.set(item.filename, {
-            ...existing,
-            ...item,
-            id: existing.id || item.id,
-            tags: item.tags && item.tags.length > 0 ? item.tags : existing.tags,
-            detectedObjects: item.detectedObjects && item.detectedObjects.length > 0 ? item.detectedObjects : existing.detectedObjects,
-            ocrData: item.ocrData || existing.ocrData,
-            exif: {
-              ...existing.exif,
-              ...(item.exif || {})
-            }
-          });
-        } else {
-          allItemsMap.set(item.filename, item);
-        }
-      });
-
-      const allItems = Array.from(allItemsMap.values()).map(item => {
-        if (trashedItems.includes(item.filename)) {
-          return { ...item, isDeleted: true };
-        }
-        return item;
-      });
-
-      res.json({ success: true, data: allItems });
-    } catch (err) {
-      console.error('Failed to read media directory:', err);
-      res.status(500).json({ success: false, error: 'Failed to read media directory' });
-    }
+  app.get('/api/media', (req, res) => {
+    res.json({ success: true, data: listMedia() });
   });
 
   app.get('/api/config', (req, res) => {
@@ -639,7 +529,6 @@ async function startServer() {
     }
 
     const processedItems = [];
-    const freshDb = fs.existsSync(INDEX_FILE) ? JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8')) : [];
 
     for (const file of req.files) {
       let filePath = file.path;
@@ -731,7 +620,7 @@ async function startServer() {
       }
 
       // Deduplication check
-      const isDup = freshDb.find((item: any) => item.title === file.originalname && (item.originalSize === file.size || item.size === file.size || item.exif?.sizeBytes === file.size));
+      const isDup = findDuplicate(file.originalname, file.size);
       if (isDup) {
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         processedItems.push(isDup);
@@ -908,8 +797,8 @@ async function startServer() {
           videoMeta
         };
 
-        freshDb.push(newItem);
-        processedItems.push(newItem);
+        // Placeholder tags mean the AI call failed; keep the item pending so it can be analysed later.
+        processedItems.push(insertMedia(newItem as any, { source: 'upload', aiStatus: hasAiResults(newItem as any) ? 'done' : 'pending' }));
 
       } catch (err: any) {
         console.warn('AI analysis fallback triggered:', err?.message || err);
@@ -938,23 +827,17 @@ async function startServer() {
           videoMeta
         };
 
-        freshDb.push(newItem);
-        processedItems.push(newItem);
+        processedItems.push(insertMedia(newItem as any, { source: 'upload', aiStatus: 'pending' }));
       }
     }
 
-    fs.writeFileSync(INDEX_FILE, JSON.stringify(freshDb, null, 2));
     res.json({ success: true, items: processedItems });
   });
 
   app.post('/api/media/trash', (req, res) => {
     const filenames = readFilenames(req, res);
     if (!filenames) return;
-    let trashed = getTrashIndex();
-    for (const f of filenames) {
-      if (!trashed.includes(f)) trashed.push(f);
-    }
-    saveTrashIndex(trashed);
+    setDeleted(filenames, true);
     audit(req.user!.email, 'trash', filenames);
     res.json({ success: true, message: 'Trashed' });
   });
@@ -962,9 +845,7 @@ async function startServer() {
   app.post('/api/media/restore', (req, res) => {
     const filenames = readFilenames(req, res);
     if (!filenames) return;
-    let trashed = getTrashIndex();
-    trashed = trashed.filter(f => !filenames.includes(f));
-    saveTrashIndex(trashed);
+    setDeleted(filenames, false);
     audit(req.user!.email, 'restore', filenames);
     res.json({ success: true, message: 'Restored' });
   });
@@ -985,35 +866,22 @@ async function startServer() {
     }
     const changes = Object.fromEntries(Object.entries(updatedItem).filter(([key]) => !SERVER_OWNED_FIELDS.includes(key)));
 
-    const indexedItems = getLibraryIndex();
-    const existingIdx = indexedItems.findIndex(i => i.filename === filename);
-    if (existingIdx !== -1) {
-      indexedItems[existingIdx] = { ...indexedItems[existingIdx], ...changes };
-    } else {
-      // Uploads listed from media_uploads but not indexed yet get a server-built entry.
-      const storedPath = path.join(mediaDir, filename);
-      if (!fs.existsSync(storedPath)) return res.status(404).json({ success: false, error: 'Not found' });
-      indexedItems.push({
-        ...changes,
-        id: typeof updatedItem.id === 'string' ? updatedItem.id.slice(0, 120) : `upload-${Date.now()}`,
-        filename,
-        path: storedPath,
-        url: `/media/${filename}`,
-        thumbnailUrl: `/media/${filename}`,
-      });
-    }
+    // AI state belongs to the worker, not to clients.
+    delete changes.aiStatus;
+    delete changes.aiError;
 
-    saveLibraryIndex(indexedItems);
-    res.json({ success: true, message: 'Updated successfully' });
+    const existing = getMediaByFilename(filename);
+    if (!existing) return res.status(404).json({ success: false, error: 'Not found' });
+    const saved = updateMedia(existing.id, changes);
+    res.json({ success: true, message: 'Updated successfully', item: saved });
   });
 
   /** Removes items from disk (media_uploads only), the index and the trash list, then audits it. */
   const deleteItems = (email: string, action: string, filenames: string[]) => {
-    const indexedItems = getLibraryIndex();
     const deleted: string[] = [];
     const indexOnly: string[] = [];
     for (const f of filenames) {
-      const item = indexedItems.find(i => i.filename === f);
+      const item = getMediaByFilename(f);
       try {
         const result = deleteStoredFiles(f, item);
         if (result === 'deleted') deleted.push(f);
@@ -1022,15 +890,14 @@ async function startServer() {
         console.error(`Failed to delete ${f}:`, e);
       }
     }
-    saveLibraryIndex(indexedItems.filter(item => !filenames.includes(item.filename)));
-    saveTrashIndex(getTrashIndex().filter(f => !filenames.includes(f)));
+    removeMedia(filenames);
     audit(email, action, filenames, indexOnly.length ? `kept originals: ${JSON.stringify(indexOnly)}` : '');
     return { deleted, indexOnly };
   };
 
   app.delete('/api/media/trash/empty', (req, res) => {
     try {
-      const trashedFilenames = getTrashIndex().filter(f => {
+      const trash = trashedFilenames().filter(f => {
         try {
           safeFilename(f);
           return true;
@@ -1038,8 +905,7 @@ async function startServer() {
           return false;
         }
       });
-      const { deleted, indexOnly } = deleteItems(req.user!.email, 'empty-trash', trashedFilenames);
-      saveTrashIndex([]);
+      const { deleted, indexOnly } = deleteItems(req.user!.email, 'empty-trash', trash);
       res.json({ success: true, deletedCount: deleted.length + indexOnly.length });
     } catch (err: any) {
       console.error('Failed to empty trash:', err);
@@ -1099,9 +965,7 @@ async function startServer() {
         const files = fs.readdirSync(currentLibraryPath);
         scanProgress.totalFiles = files.length;
 
-        let indexedItems = getLibraryIndex();
         let indexedCount = 0;
-        const supportedExts = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.webm', '.heic', '.webp'];
 
         for (const file of files) {
           const srcPath = path.join(currentLibraryPath, file);
@@ -1109,8 +973,8 @@ async function startServer() {
             const stat = fs.statSync(srcPath);
             if (stat.isFile()) {
               const ext = path.extname(file).toLowerCase();
-              if (supportedExts.includes(ext)) {
-                const isVideo = ['.mp4', '.mov', '.webm'].includes(ext);
+              if (SUPPORTED_EXTS.includes(ext)) {
+                const isVideo = VIDEO_EXTS.includes(ext);
                 let realExif: any = {};
                 if (!isVideo) {
                   try {
@@ -1121,8 +985,6 @@ async function startServer() {
                 const dateInfo = extractRealDate(realExif, stat);
                 const formattedExif = formatExifData(realExif, stat, ext, dateInfo.dateTaken);
 
-                indexedItems = indexedItems.filter(i => i.path !== srcPath && i.filename !== file);
-
                 let lat = undefined;
                 let lng = undefined;
 
@@ -1131,11 +993,24 @@ async function startServer() {
                   lng = realExif.longitude;
                 }
 
+                const location = lat && lng ? { name: 'GPS Location', city: '', country: '', latitude: lat, longitude: lng } : undefined;
+                const known = getMediaByPath(srcPath);
+                if (known) {
+                  // Rescan: refresh file metadata, keep tags, AI results and edits.
+                  updateMedia(known.id, { exif: formattedExif as any, location: known.location?.name && known.location.name !== 'GPS Location' ? known.location : location });
+                  indexedCount++;
+                  scanProgress.logMessages.push(`[INDEX] Refreshed ${file}`);
+                  continue;
+                }
+
+                // `filename` is the item's key for trash/delete; scanned names get a prefix if they clash.
+                const baseName = sanitizeUploadName(file);
+                const filename = getMediaByFilename(baseName) ? `scan-${Math.random().toString(36).substring(2, 8)}-${baseName}` : baseName;
                 const id = `media-idx-${Date.now()}-${Math.random().toString(36).substring(7)}`;
                 const newItem = {
                   id,
                   title: file,
-                  filename: file,
+                  filename,
                   path: srcPath,
                   url: `/api/media/${id}/file`,
                   thumbnailUrl: `/api/media/${id}/file`,
@@ -1143,19 +1018,14 @@ async function startServer() {
                   date: dateInfo.date,
                   dateFormatted: dateInfo.dateFormatted,
                   exif: formattedExif,
-                  location: lat && lng ? {
-                    name: 'GPS Location',
-                    city: '',
-                    country: '',
-                    latitude: lat,
-                    longitude: lng
-                  } : undefined,
-                  tags: ['indexed', isVideo ? 'video' : 'image'],
+                  location,
+                  tags: [],
                   detectedObjects: [],
+                  originalSize: stat.size,
                   isFavorite: false
                 };
 
-                indexedItems.push(newItem);
+                insertMedia(newItem as any, { source: 'scan', aiStatus: 'pending' });
                 indexedCount++;
                 scanProgress.logMessages.push(`[INDEX] Indexed ${file}`);
               }
@@ -1165,7 +1035,6 @@ async function startServer() {
           }
         }
 
-        saveLibraryIndex(indexedItems);
         scanProgress.scannedCount = indexedCount;
         scanProgress.logMessages.push(`[COMPLETE] Indexed ${indexedCount} files`);
       } else {

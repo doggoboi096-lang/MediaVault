@@ -36,3 +36,7 @@ metadata.json
 # Server logs & registered library folders
 logs/
 library_roots.json
+
+# SQLite database (WAL) and backups of the old JSON stores
+data/
+*.json.bak

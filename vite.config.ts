@@ -25,7 +25,8 @@ export default defineConfig(() => {
       fs: {
         deny: [
           '.env', '.env.*', '*.{crt,pem}', '**/.git/**',
-          '**/media_uploads/**', '**/library_index.json', '**/trash_index.json', '**/library_roots.json',
+          '**/media_uploads/**', '**/data/**', '**/*.json.bak',
+          '**/library_index.json', '**/trash_index.json', '**/library_roots.json',
           '**/.ai_runtime/**', '**/models/**', '**/logs/**',
         ],
       },

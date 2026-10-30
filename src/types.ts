@@ -80,6 +80,20 @@ export interface MediaItem {
   originalHeicUrl?: string;
   description?: string;
   originalSize?: number;
+  /** Background AI tagging state. */
+  aiStatus?: AiStatus;
+  aiError?: string;
+}
+
+export type AiStatus = 'pending' | 'processing' | 'done' | 'failed';
+
+/** Background queue counters pushed over /api/events. */
+export interface QueueProgress {
+  pending: number;
+  processing: number;
+  failed: number;
+  /** Why the worker is idle while work is waiting, if it is. */
+  blockedBy: 'paused' | 'on-battery' | 'ai-unavailable' | null;
 }
 
 export interface SmartCollection {

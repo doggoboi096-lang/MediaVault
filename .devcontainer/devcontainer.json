@@ -1,6 +1,6 @@
 {
     "name": "MediaVault-AIRiser2026",
-    "image": "mcr.microsoft.com/devcontainers/typescript-node:20",
+    "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
     "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ffmpeg && npm install",
     "containerEnv": {
         "AUTH_DISABLED": "true",

@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Search, Plus, HelpCircle, Settings, Menu, X, Languages } from 'lucide-react';
-import { auth } from '../lib/firebase';
+import { Search, Plus, HelpCircle, Settings, Menu, X, Languages, LogOut } from 'lucide-react';
 import { translations, Lang } from '../lib/i18n';
 import { IconButton } from './ui';
 
@@ -12,6 +11,9 @@ interface HeaderProps {
   onOpenSettings: () => void;
   onOpenProjectInfo: () => void;
   onToggleSidebar: () => void;
+  onLogout: () => void;
+  /** Owner email from the server session. */
+  userEmail: string;
   lang: Lang;
   setLang: (l: Lang) => void;
 }
@@ -33,6 +35,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSettings,
   onOpenProjectInfo,
   onToggleSidebar,
+  onLogout,
+  userEmail,
   lang,
   setLang,
 }) => {
@@ -40,8 +44,7 @@ export const Header: React.FC<HeaderProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
   const t = (key: keyof typeof translations.en) => translations[lang][key] || key;
 
-  const user = auth.currentUser;
-  const displayName = user?.displayName || t('guestNode');
+  const displayName = userEmail ? userEmail.split('@')[0] : t('guestNode');
 
   // "/" focuses search, like most photo libraries.
   useEffect(() => {
@@ -126,19 +129,15 @@ export const Header: React.FC<HeaderProps> = ({
             aria-expanded={showAccount}
             className="w-10 h-10 rounded-full p-[3px] ring-2 ring-accent-strong/80 hover:ring-accent transition-shadow cursor-pointer"
           >
-            {user?.photoURL ? (
-              <img src={user.photoURL} alt="" className="w-full h-full rounded-full object-cover" />
-            ) : (
-              <span className="w-full h-full rounded-full bg-accent-container text-on-accent-container flex items-center justify-center text-sm font-semibold">
-                {displayName.charAt(0).toUpperCase()}
-              </span>
-            )}
+            <span className="w-full h-full rounded-full bg-accent-container text-on-accent-container flex items-center justify-center text-sm font-semibold">
+              {displayName.charAt(0).toUpperCase()}
+            </span>
           </button>
 
           {showAccount && (
             <div className="absolute right-0 mt-2 w-72 rounded-3xl bg-[#26282c] shadow-2xl shadow-black/50 p-4 z-50">
-              <p className="text-center text-sm text-ink-muted">{user?.email || 'localhost'}</p>
-              <p className="text-center text-xl text-ink mt-2">{displayName}</p>
+              <p className="text-center text-sm text-ink-muted truncate">{userEmail || 'localhost'}</p>
+              <p className="text-center text-xl text-ink mt-2 truncate">{displayName}</p>
               <button
                 type="button"
                 onClick={() => {
@@ -148,6 +147,18 @@ export const Header: React.FC<HeaderProps> = ({
                 className="mt-4 w-full h-10 rounded-full border border-ink-faint text-sm font-medium text-accent hover:bg-accent/10 transition-colors cursor-pointer"
               >
                 {t('settingsTitle')}
+              </button>
+              <button
+                type="button"
+                id="btn-sign-out"
+                onClick={() => {
+                  setShowAccount(false);
+                  onLogout();
+                }}
+                className="mt-2 w-full h-10 rounded-full flex items-center justify-center gap-2 text-sm font-medium text-ink hover:bg-tile-hover transition-colors cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+                {t('signOut')}
               </button>
             </div>
           )}

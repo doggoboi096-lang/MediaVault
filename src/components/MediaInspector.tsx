@@ -28,6 +28,7 @@ import {
 import { MediaItem } from '../types';
 import { SmartMedia } from './SmartMedia';
 import { translations, Lang } from '../lib/i18n';
+import { apiFetch } from '../lib/api';
 
 interface MediaInspectorProps {
   item: MediaItem;
@@ -569,7 +570,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                   setLocalItem(updated);
                 }}
                 onBlur={() => {
-                  fetch('/api/media', {
+                  apiFetch('/api/media', {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ item: { filename: localItem.filename, description: localItem.description } })

@@ -3,6 +3,7 @@ import { Upload, X, CheckCircle2, Sparkles, Film, Image as ImageIcon, FileText, 
 import confetti from 'canvas-confetti';
 import { MediaItem } from '../types';
 import { translations, Lang } from '../lib/i18n';
+import { apiFetch } from '../lib/api';
 
 interface UploadModalProps {
   isOpen: boolean;
@@ -70,7 +71,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
     });
 
     try {
-      const response = await fetch('/api/analyze-media', {
+      const response = await apiFetch('/api/analyze-media', {
         method: 'POST',
         body: formData
       });

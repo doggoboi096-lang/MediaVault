@@ -3,6 +3,7 @@ import { ChevronDown, Folder, Check } from 'lucide-react';
 import { SystemHardwareStatus } from '../types';
 import { translations, Lang, fill, formatBytes } from '../lib/i18n';
 import { PageHeader, PillButton, TextButton } from './ui';
+import { apiFetch } from '../lib/api';
 
 interface SettingsViewProps {
   hwStatus: SystemHardwareStatus;
@@ -94,13 +95,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     if (initialOpen) setOpenRows(rows => (rows.includes(initialOpen) ? rows : [...rows, initialOpen]));
   }, [initialOpen]);
 
-  // Live local-AI runtime status
+  // Live local-AI runtime status (part of the authenticated /api/system response)
   useEffect(() => {
     let alive = true;
     const poll = () =>
-      fetch('/api/health')
+      apiFetch('/api/system')
         .then(r => r.json())
-        .then(d => alive && setAi(d.ai || null))
+        .then(d => alive && setAi(d.data?.ai || null))
         .catch(() => alive && setAi(null));
     poll();
     const id = setInterval(poll, 3000);

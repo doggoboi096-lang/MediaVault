@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
 import { Loader2, Trash2 } from 'lucide-react';
-import { auth } from './lib/firebase';
 import { translations, Lang, fill } from './lib/i18n';
+import { apiFetch, UNAUTHORIZED_EVENT } from './lib/api';
 import {
   ViewId,
   Collection,
@@ -36,7 +35,10 @@ import { SMART_COLLECTIONS, INDEXING_ACTIVITIES, DEFAULT_HARDWARE_STATUS } from 
 import { MediaItem, SmartCollection, IndexingActivity, SystemHardwareStatus, LibraryScanProgress } from './types';
 
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  // The server session (httpOnly cookie) is the source of truth; /api/auth/me tells us if it is valid.
+  const [authState, setAuthState] = useState<'checking' | 'in' | 'out'>('checking');
+  const [userEmail, setUserEmail] = useState<string>('');
+  const isAuthenticated = authState === 'in';
   const [view, setView] = useState<ViewId>('photos');
   const [openCollectionId, setOpenCollectionId] = useState<string | null>(null);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
@@ -70,19 +72,44 @@ export default function App() {
 
   const t = (key: keyof typeof translations.en) => translations[lang][key] || key;
 
-  // Auth listener
+  // Session check on load, and back to the sign-in screen whenever an API call returns 401
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setIsAuthenticated(!!user);
-    });
-    return () => unsubscribe();
+    fetch('/api/auth/me', { credentials: 'same-origin' })
+      .then(async res => {
+        if (!res.ok) return setAuthState('out');
+        const data = await res.json();
+        setUserEmail(data.email || '');
+        setAuthState('in');
+      })
+      .catch(() => setAuthState('out'));
+
+    const onUnauthorized = () => {
+      setAuthState('out');
+      setSelectedMedia(null);
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, []);
+
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {
+      console.error('Failed to sign out', e);
+    }
+    setAuthState('out');
+    setUserEmail('');
+    setSelectedMedia(null);
+    setMediaList([]);
+    setIsLoadingMedia(true);
+  };
 
   // Real host telemetry (CPU, GPU, drives) for the sidebar storage meter and settings
   useEffect(() => {
+    if (!isAuthenticated) return;
     async function fetchSystem() {
       try {
-        const res = await fetch('/api/system');
+        const res = await apiFetch('/api/system');
         const data = await res.json();
         if (data.success && data.data) {
           setHwStatus(prev => ({
@@ -102,13 +129,14 @@ export default function App() {
     fetchSystem();
     const interval = setInterval(fetchSystem, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isAuthenticated]);
 
   // Fetch real media from backend
   useEffect(() => {
+    if (!isAuthenticated) return;
     async function fetchMedia() {
       try {
-        const res = await fetch('/api/media');
+        const res = await apiFetch('/api/media');
         const data = await res.json();
         if (data.success && data.data) {
           setMediaList(data.data);
@@ -121,7 +149,7 @@ export default function App() {
       }
     }
     fetchMedia();
-  }, []);
+  }, [isAuthenticated]);
 
   // Global key listener for ⌘K / Ctrl+K
   useEffect(() => {
@@ -200,7 +228,7 @@ export default function App() {
     setMediaList(prev => prev.map(m => m.id === updatedItem.id ? updatedItem : m));
     setSelectedMedia(prev => (prev && prev.id === updatedItem.id ? updatedItem : prev));
     try {
-      await fetch('/api/media', {
+      await apiFetch('/api/media', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ item: updatedItem })
@@ -219,7 +247,7 @@ export default function App() {
 
   const handleTrashMedia = async (filenames: string[]) => {
     try {
-      const res = await fetch('/api/media/trash', {
+      const res = await apiFetch('/api/media/trash', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filenames })
@@ -237,7 +265,7 @@ export default function App() {
 
   const handleRestoreMedia = async (filenames: string[]) => {
     try {
-      const res = await fetch('/api/media/restore', {
+      const res = await apiFetch('/api/media/restore', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filenames })
@@ -255,7 +283,7 @@ export default function App() {
 
   const handlePermanentlyDeleteMedia = async (filenames: string[]) => {
     try {
-      const res = await fetch('/api/media', {
+      const res = await apiFetch('/api/media', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filenames })
@@ -273,7 +301,7 @@ export default function App() {
 
   const handleEmptyTrash = async () => {
     try {
-      const res = await fetch('/api/media/trash/empty', { method: 'DELETE' });
+      const res = await apiFetch('/api/media/trash/empty', { method: 'DELETE' });
       if (res.ok) {
         setMediaList(prev => prev.filter(m => !m.isDeleted));
         setSelectedMedia(null);
@@ -406,8 +434,21 @@ export default function App() {
     }
   };
 
+  if (authState === 'checking') {
+    return <div className="h-screen w-screen bg-shell" aria-busy="true" />;
+  }
+
   if (!isAuthenticated) {
-    return <LoginScreen onLoginSuccess={() => setIsAuthenticated(true)} lang={lang} setLang={setLang} />;
+    return (
+      <LoginScreen
+        onLoginSuccess={(email) => {
+          setUserEmail(email);
+          setAuthState('in');
+        }}
+        lang={lang}
+        setLang={setLang}
+      />
+    );
   }
 
   // ── Page rendering ────────────────────────────────────────────────────────
@@ -563,6 +604,8 @@ export default function App() {
             onOpenSettings={() => openSettings()}
             onOpenProjectInfo={() => setShowArchitecture(true)}
             onToggleSidebar={() => setSidebarOpen(v => !v)}
+            onLogout={handleLogout}
+            userEmail={userEmail}
             lang={lang}
             setLang={setLang}
           />

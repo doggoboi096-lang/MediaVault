@@ -1,291 +1,297 @@
-import React, { useState } from 'react';
-import { 
-  HardDrive, 
-  Cpu, 
-  Sparkles, 
-  ShieldCheck, 
-  Database, 
-  RefreshCw, 
-  Folder, 
-  Check, 
-  Sliders, 
-  Activity, 
-  Terminal,
-  Zap,
-  Globe,
-  Lock
-} from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ChevronDown, Folder, Check } from 'lucide-react';
 import { SystemHardwareStatus } from '../types';
-import { translations, Lang } from '../lib/i18n';
+import { translations, Lang, fill, formatBytes } from '../lib/i18n';
+import { PageHeader, PillButton, TextButton } from './ui';
 
 interface SettingsViewProps {
   hwStatus: SystemHardwareStatus;
   currentLibraryPath: string;
   onUpdateLibraryPath: (path: string) => void;
   onTriggerScan: () => void;
+  onOpenProjectInfo: () => void;
   lang: Lang;
+  setLang: (l: Lang) => void;
+  /** Row to open on arrival, e.g. 'hardware' from the sidebar's "Manage storage". */
+  initialOpen?: RowId;
 }
+
+type RowId = 'language' | 'ai' | 'media' | 'network' | 'database' | 'hardware';
+
+interface AiStatus {
+  stage: 'idle' | 'downloading' | 'starting' | 'ready' | 'error';
+  message: string;
+  progress: number;
+}
+
+const KV: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div className="flex items-baseline justify-between gap-6 py-2.5 text-sm">
+    <span className="text-ink-muted">{label}</span>
+    <span className="text-ink text-right">{children}</span>
+  </div>
+);
+
+const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <label className="block py-2">
+    <span className="block text-sm text-ink-muted mb-2">{label}</span>
+    {children}
+  </label>
+);
+
+/** Expandable settings row; kept outside SettingsView so its inputs don't remount on every render. */
+const Row: React.FC<{
+  id: RowId;
+  open: boolean;
+  onToggle: () => void;
+  title: string;
+  description: string;
+  aside?: React.ReactNode;
+  children: React.ReactNode;
+}> = ({ id, open, onToggle, title, description, aside, children }) => (
+  <section id={`settings-${id}`} className="border-t border-line">
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      className="w-full flex items-center gap-4 py-6 text-left cursor-pointer group"
+    >
+      <div className="flex-1 min-w-0">
+        <h2 className="text-[17px] text-ink">{title}</h2>
+        <p className="text-sm text-ink-muted mt-1 leading-relaxed">{description}</p>
+      </div>
+      {aside}
+      <span className="w-10 h-10 rounded-full flex items-center justify-center text-ink-muted group-hover:bg-tile-hover flex-shrink-0">
+        <ChevronDown className={`w-5 h-5 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </span>
+    </button>
+    {open && <div className="pb-6 -mt-2 sm:pr-14">{children}</div>}
+  </section>
+);
+
+const selectClass =
+  'w-full h-11 rounded-lg bg-tile border border-line px-3 text-sm text-ink outline-none focus:border-accent cursor-pointer';
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   hwStatus,
   currentLibraryPath,
   onUpdateLibraryPath,
   onTriggerScan,
-  lang
+  onOpenProjectInfo,
+  lang,
+  setLang,
+  initialOpen,
 }) => {
-  const [libraryInput, setLibraryInput] = useState(currentLibraryPath);
-  const [hwEngine, setHwEngine] = useState<string>(hwStatus.hwAccelEngine);
-  const [yoloConf, setYoloConf] = useState<number>(65);
-  const [vpnMesh, setVpnMesh] = useState<string>(hwStatus.vpnMesh.provider);
-  const [isSaved, setIsSaved] = useState(false);
   const t = (key: keyof typeof translations.en) => translations[lang][key] || key;
+  const [libraryInput, setLibraryInput] = useState(currentLibraryPath);
+  const [isSaved, setIsSaved] = useState(false);
+  const [hwEngine, setHwEngine] = useState<string>(hwStatus.hwAccelEngine);
+  const [confidence, setConfidence] = useState<number>(65);
+  const [vpnMesh, setVpnMesh] = useState<string>(hwStatus.vpnMesh.provider);
+  const [openRows, setOpenRows] = useState<RowId[]>(initialOpen ? [initialOpen] : []);
+  const [ai, setAi] = useState<AiStatus | null>(null);
 
-  const handleSaveSettings = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (initialOpen) setOpenRows(rows => (rows.includes(initialOpen) ? rows : [...rows, initialOpen]));
+  }, [initialOpen]);
+
+  // Live local-AI runtime status
+  useEffect(() => {
+    let alive = true;
+    const poll = () =>
+      fetch('/api/health')
+        .then(r => r.json())
+        .then(d => alive && setAi(d.ai || null))
+        .catch(() => alive && setAi(null));
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  const toggle = (id: RowId) => setOpenRows(rows => (rows.includes(id) ? rows.filter(r => r !== id) : [...rows, id]));
+
+  const saveFolder = (e: React.FormEvent) => {
     e.preventDefault();
     onUpdateLibraryPath(libraryInput);
     setIsSaved(true);
     setTimeout(() => setIsSaved(false), 2500);
   };
 
+  const aiLabel = !ai
+    ? t('aiStatusUnknown')
+    : ai.stage === 'ready'
+      ? t('aiStatusReady')
+      : ai.stage === 'downloading'
+        ? fill(t('aiStatusDownloading'), { p: ai.progress })
+        : ai.stage === 'error'
+          ? t('aiStatusError')
+          : t('aiStatusStarting');
+  const aiDot = ai?.stage === 'ready' ? 'bg-[#7ed3a4]' : ai?.stage === 'error' ? 'bg-[#f2a39a]' : 'bg-[#f2b84b]';
+
+  const watcherStatus = t('activeLatency').toLowerCase();
+  const rowProps = (id: RowId) => ({ id, open: openRows.includes(id), onToggle: () => toggle(id) });
+
   return (
-    <div id="settings-container" className="p-6 max-w-[1200px] mx-auto space-y-6 select-none">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
-        <div>
-          <h1 className="text-lg font-bold text-zinc-100 tracking-tight">{t('systemConfigTitle')}</h1>
-          <p className="text-xs text-zinc-400 mt-0.5">
-            {t('systemConfigDesc')}
+    <>
+      <PageHeader title={t('settingsTitle')} />
+      <div id="settings-container" className="max-w-[880px] w-full mx-auto px-6 py-8">
+        {/* Library folder */}
+        <form onSubmit={saveFolder} className="pb-8">
+          <h2 className="text-sm font-medium text-ink">{t('libraryFolder')}</h2>
+          <p className="text-sm text-ink-muted mt-1">{t('libraryFolderDesc')}</p>
+          <div className="mt-4 h-12 rounded-lg border border-ink-faint focus-within:border-accent flex items-center gap-3 px-4 transition-colors">
+            <Folder className="w-5 h-5 text-ink-muted flex-shrink-0" />
+            <input
+              type="text"
+              value={libraryInput}
+              onChange={e => setLibraryInput(e.target.value)}
+              aria-label={t('libraryFolder')}
+              spellCheck={false}
+              className="flex-1 min-w-0 bg-transparent text-[15px] text-ink outline-none"
+            />
+          </div>
+          <p className="text-[13px] text-ink-muted mt-2">
+            {t('dirWatcher')}: {watcherStatus.charAt(0).toUpperCase() + watcherStatus.slice(1)}
           </p>
-        </div>
-
-        <button
-          onClick={handleSaveSettings}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium shadow-sm transition-all cursor-pointer"
-        >
-          {isSaved ? <Check className="w-3.5 h-3.5 text-white" /> : <Zap className="w-3.5 h-3.5" />}
-          <span>{isSaved ? t('settingsSaved') : t('saveChanges')}</span>
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {/* Section 1: Physical Media Storage */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-md bg-zinc-800 border border-zinc-700 flex items-center justify-center text-emerald-400">
-              <HardDrive className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-zinc-100">{t('physicalStorageRoot')}</h2>
-              <p className="text-[11px] text-zinc-500">{t('physicalStorageDesc')}</p>
-            </div>
+          <div className="flex flex-wrap gap-3 mt-5">
+            <PillButton type="submit" variant="filled">
+              <span className="flex items-center gap-2">
+                {isSaved && <Check className="w-4 h-4" />}
+                {isSaved ? t('saved') : t('saveFolder')}
+              </span>
+            </PillButton>
+            <PillButton onClick={onTriggerScan}>{t('rescanFolder')}</PillButton>
           </div>
+        </form>
 
-          <div className="space-y-3 text-xs">
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block font-mono">{t('primaryLibraryPath')}</label>
-              <div className="flex items-center rounded-md bg-zinc-950 border border-zinc-800 overflow-hidden">
-                <div className="pl-3 text-zinc-500">
-                  <Folder className="w-3.5 h-3.5" />
-                </div>
+        <Row {...rowProps('language')} title={t('languageRow')} description={t('languageDesc')}>
+          <div role="radiogroup" aria-label={t('languageRow')} className="space-y-1">
+            {(
+              [
+                ['vi', 'Tiếng Việt'],
+                ['en', 'English'],
+              ] as [Lang, string][]
+            ).map(([value, label]) => (
+              <label key={value} className="flex items-center gap-4 py-2 cursor-pointer">
                 <input
-                  type="text"
-                  value={libraryInput}
-                  onChange={(e) => setLibraryInput(e.target.value)}
-                  className="flex-1 bg-transparent py-2 px-2.5 font-mono text-xs text-zinc-200 focus:outline-none"
+                  type="radio"
+                  name="lang"
+                  checked={lang === value}
+                  onChange={() => setLang(value)}
+                  className="w-5 h-5 accent-[#a8c3ff] cursor-pointer"
                 />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between pt-2 border-t border-zinc-800/80 text-[11px]">
-              <span className="text-zinc-500">{t('dirWatcher')}</span>
-              <span className="text-emerald-400 font-mono font-bold">{t('activeLatency')}</span>
-            </div>
-
-            <button
-              type="button"
-              onClick={onTriggerScan}
-              className="w-full py-2 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium text-xs flex items-center justify-center gap-2 border border-zinc-700 transition-colors cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
-              <span>{t('rescanIndex')}</span>
-            </button>
+                <span className="text-[15px] text-ink">{label}</span>
+              </label>
+            ))}
           </div>
-        </div>
+        </Row>
 
-        {/* Section 2: Hardware Acceleration & FFmpeg */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-md bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sky-400">
-              <Cpu className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-zinc-100">{t('mediaProcessing')}</h2>
-              <p className="text-[11px] text-zinc-500">{t('mediaProcessingDesc')}</p>
-            </div>
-          </div>
-
-          <div className="space-y-3 text-xs">
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block font-mono">{t('hwAccelEngineLabel')}</label>
-              <select
-                value={hwEngine}
-                onChange={(e) => setHwEngine(e.target.value)}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-md py-2 px-2.5 font-mono text-xs text-zinc-200 focus:outline-none cursor-pointer"
-              >
-                <option value="NVIDIA NVENC (CUDA 12.4)">NVIDIA NVENC (CUDA 12.4 / RTX 4080)</option>
-                <option value="Intel QuickSync (VAAPI)">Intel QuickSync (VAAPI / QSV)</option>
-                <option value="Apple VideoToolbox">Apple VideoToolbox (M-Series)</option>
-                <option value="CPU (libx265)">CPU Fallback (libx264/libx265)</option>
-              </select>
-            </div>
-
-            <div className="space-y-1.5 pt-2 border-t border-zinc-800/80 text-[11px]">
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('processorThreads')}</span>
-                <span className="font-mono text-zinc-200">{hwStatus.cpuCores} Threads ({hwStatus.cpuModel})</span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('thumbnailCache')}</span>
-                <span className="font-mono text-emerald-400">{t('webpOnthefly')}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Section 3: Local AI Inference (YOLOv8 & OCR) */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-md bg-zinc-800 border border-zinc-700 flex items-center justify-center text-emerald-400">
-                <Sparkles className="w-4 h-4" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-zinc-100">{t('aiVisionLocal')}</h2>
-                <p className="text-[11px] text-zinc-500">{t('edgeBasedObject')}</p>
-              </div>
-            </div>
-            <span className="text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded font-semibold">
-              Local via llama.cpp
+        <Row
+          {...rowProps('ai')}
+          title={t('aiRow')}
+          description={t('aiRowDesc')}
+          aside={
+            <span className="hidden sm:flex items-center gap-2 text-sm text-ink-muted flex-shrink-0">
+              <span className={`w-2 h-2 rounded-full ${aiDot}`} />
+              {aiLabel}
             </span>
+          }
+        >
+          <KV label={t('aiStatus')}>{ai?.message || aiLabel}</KV>
+          <KV label={t('modelArch')}>Qwen3-VL 4B (llama.cpp)</KV>
+          <KV label={t('ocrPipeline')}>Qwen3-VL Native OCR</KV>
+          <KV label={t('avgLatency')}>{hwStatus.yoloInferenceAvgMs} ms / frame</KV>
+          <Field label={`${t('confidenceCutoff')}: ${confidence}%`}>
+            <input
+              type="range"
+              min="40"
+              max="95"
+              value={confidence}
+              onChange={e => setConfidence(Number(e.target.value))}
+              className="w-full accent-[#a8c3ff] cursor-pointer"
+            />
+          </Field>
+        </Row>
+
+        <Row {...rowProps('media')} title={t('mediaProcessing')} description={t('mediaProcessingDesc')}>
+          <Field label={t('hwAccelEngine')}>
+            <select value={hwEngine} onChange={e => setHwEngine(e.target.value)} className={selectClass}>
+              <option value="NVIDIA NVENC (CUDA 12.4)">NVIDIA NVENC (CUDA 12.4)</option>
+              <option value="Intel QuickSync (VAAPI)">Intel QuickSync (VAAPI / QSV)</option>
+              <option value="Apple VideoToolbox">Apple VideoToolbox (M-Series)</option>
+              <option value="CPU (libx265)">CPU (libx264 / libx265)</option>
+            </select>
+          </Field>
+          <KV label={t('processorThreads')}>
+            {hwStatus.cpuCores} threads, {hwStatus.cpuModel}
+          </KV>
+          <KV label={t('thumbnailCache')}>{t('webpOnthefly')}</KV>
+        </Row>
+
+        <Row {...rowProps('network')} title={t('meshVpnProxy')} description={t('meshVpnDesc')}>
+          <Field label={t('vpnMeshLabel')}>
+            <select value={vpnMesh} onChange={e => setVpnMesh(e.target.value)} className={selectClass}>
+              <option value="Tailscale">Tailscale (node 100.84.192.42)</option>
+              <option value="WireGuard">WireGuard (direct peer 51820)</option>
+              <option value="Cloudflare WARP">Cloudflare WARP tunnel</option>
+            </select>
+          </Field>
+          <KV label={t('reverseProxy')}>Nginx 1.25 (HTTP/3 QUIC)</KV>
+          <KV label={t('sslCert')}>Let's Encrypt, auto-renewal</KV>
+          <KV label={t('lanOrigin')}>192.168.1.105:3000</KV>
+        </Row>
+
+        <Row
+          {...rowProps('database')}
+          title={t('dbEngineMetrics')}
+          description={t('dbEngineDesc')}
+          aside={<span className="hidden sm:inline text-sm text-ink-muted flex-shrink-0">{t('simulatedJson')}</span>}
+        >
+          <KV label={t('totalRecordsLabel')}>{hwStatus.dbStats.records.toLocaleString()}</KV>
+          <KV label={t('dbSizeLabel')}>{hwStatus.dbStats.dbSize}</KV>
+          <KV label={t('cacheHitLabel')}>{hwStatus.dbStats.cacheHitRatio}</KV>
+          <KV label={t('ramCacheLabel')}>256 MB</KV>
+          <KV label="WAL">{t('dbHealthy')}</KV>
+        </Row>
+
+        <Row {...rowProps('hardware')} title={t('hardwareRow')} description={t('hardwareDesc')}>
+          <KV label="CPU">
+            {hwStatus.cpuModel} ({hwStatus.cpuCores} threads)
+          </KV>
+          <KV label="GPU">{hwStatus.gpuName || hwStatus.gpuModel}</KV>
+          <KV label={t('hwAccelEngine')}>{hwStatus.hwAccelEngine}</KV>
+          {hwStatus.drives?.length > 0 && (
+            <div className="pt-3">
+              <span className="block text-sm text-ink-muted mb-3">{t('drivesLabel')}</span>
+              <div className="space-y-4">
+                {hwStatus.drives.map(d => (
+                  <div key={d.name}>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-ink">{d.name}</span>
+                      <span className="text-ink-muted">
+                        {fill(t('storageUsedOf'), { used: formatBytes(d.usedBytes), total: formatBytes(d.totalBytes) })}
+                      </span>
+                    </div>
+                    <div className="mt-2 h-1 rounded-full bg-line overflow-hidden">
+                      <div className="h-full bg-accent rounded-full" style={{ width: `${Math.min(d.percentage || 0, 100)}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Row>
+
+        <section className="border-t border-line flex items-center gap-4 py-6">
+          <div className="flex-1 min-w-0">
+            <h2 className="text-[17px] text-ink">{t('projectInfoForJudges')}</h2>
+            <p className="text-sm text-ink-muted mt-1">{t('projectInfoDesc')}</p>
           </div>
-
-          <div className="space-y-3 text-xs">
-            <div className="space-y-1">
-              <div className="flex justify-between">
-                <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block font-mono">{t('confCutoff')}</label>
-                <span className="font-mono text-emerald-400 font-bold">{yoloConf}%</span>
-              </div>
-              <input
-                type="range"
-                min="40"
-                max="95"
-                value={yoloConf}
-                onChange={(e) => setYoloConf(Number(e.target.value))}
-                className="w-full accent-emerald-500 cursor-pointer"
-              />
-            </div>
-
-            <div className="space-y-1.5 pt-2 border-t border-zinc-800/80 text-[11px]">
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('modelArch')}</span>
-                <span className="font-mono text-emerald-400 font-semibold">Qwen3-VL 4B <span className="text-zinc-500 text-[10px] font-normal">(llama.cpp Local)</span></span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('avgLatency')}</span>
-                <span className="font-mono text-emerald-400">{hwStatus.yoloInferenceAvgMs} ms / frame</span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('ocrPipeline')}</span>
-                <span className="font-mono text-zinc-200">Qwen3-VL Native OCR</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Section 4: Networking & Zero-Trust Reverse Proxy */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-md bg-zinc-800 border border-zinc-700 flex items-center justify-center text-emerald-400">
-              <ShieldCheck className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-zinc-100">{t('meshVpnProxy')}</h2>
-              <p className="text-[11px] text-zinc-500">{t('meshVpnDesc')}</p>
-            </div>
-          </div>
-
-          <div className="space-y-3 text-xs">
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block font-mono">{t('zeroTrustVpn')}</label>
-              <select
-                value={vpnMesh}
-                onChange={(e) => setVpnMesh(e.target.value)}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-md py-2 px-2.5 font-mono text-xs text-zinc-200 focus:outline-none cursor-pointer"
-              >
-                <option value="Tailscale">Tailscale (Node: 100.84.192.42)</option>
-                <option value="WireGuard">WireGuard (Direct Peer 51820)</option>
-                <option value="Cloudflare WARP">Cloudflare WARP Tunnel</option>
-              </select>
-            </div>
-
-            <div className="space-y-1.5 pt-2 border-t border-zinc-800/80 text-[11px]">
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('reverseProxy')}</span>
-                <span className="font-mono text-zinc-200">Nginx 1.25 (HTTP/3 QUIC)</span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('sslCert')}</span>
-                <span className="font-mono text-emerald-400">Let's Encrypt Auto-Renewal</span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span className="text-zinc-500">{t('lanOrigin')}</span>
-                <span className="font-mono text-zinc-300">192.168.1.105:3000</span>
-              </div>
-            </div>
-          </div>
-        </div>
+          <TextButton onClick={onOpenProjectInfo}>{t('view')}</TextButton>
+        </section>
       </div>
-
-      {/* Database Health & Cache Statistics */}
-      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Database className="w-4 h-4 text-amber-400" />
-            <div>
-              <h3 className="text-xs font-bold text-zinc-100">{t('dbEngineMetrics')}</h3>
-              <p className="text-[11px] text-zinc-500">{t('dbEngineDesc')}</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-semibold">
-              Simulated via JSON for Demo
-            </span>
-            <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-semibold">
-              {t('walHealthy')}
-            </span>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-1">
-          <div className="p-3 bg-zinc-950 rounded-md border border-zinc-800">
-            <span className="text-zinc-500 block text-[9px] uppercase font-bold font-mono">{t('totalRecords')}</span>
-            <span className="text-sm font-mono font-bold text-zinc-100">{hwStatus.dbStats.records.toLocaleString()}</span>
-          </div>
-          <div className="p-3 bg-zinc-950 rounded-md border border-zinc-800">
-            <span className="text-zinc-500 block text-[9px] uppercase font-bold font-mono">{t('sqliteDbSize')} (JSON)</span>
-            <span className="text-sm font-mono font-bold text-zinc-100">{hwStatus.dbStats.dbSize}</span>
-          </div>
-          <div className="p-3 bg-zinc-950 rounded-md border border-zinc-800">
-            <span className="text-zinc-500 block text-[9px] uppercase font-bold font-mono">{t('cacheHitRatio')}</span>
-            <span className="text-sm font-mono font-bold text-emerald-400">{hwStatus.dbStats.cacheHitRatio}</span>
-          </div>
-          <div className="p-3 bg-zinc-950 rounded-md border border-zinc-800">
-            <span className="text-zinc-500 block text-[9px] uppercase font-bold font-mono">{t('ramCacheAlloc')}</span>
-            <span className="text-sm font-mono font-bold text-sky-400">256 MB Pool</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    </>
   );
 };

@@ -3,6 +3,7 @@ import { Search, Film, Image as ImageIcon, MapPin, Tag, Contact, FileText, Setti
 import { MediaItem, SmartCollection } from '../types';
 import { SmartMedia } from './SmartMedia';
 import { translations, Lang } from '../lib/i18n';
+import { ViewId } from '../lib/collections';
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -11,7 +12,7 @@ interface CommandPaletteProps {
   collections: SmartCollection[];
   onSelectMedia: (item: MediaItem) => void;
   onSelectCollection: (col: SmartCollection) => void;
-  onNavigateView: (view: 'timeline' | 'explorer' | 'settings') => void;
+  onNavigateView: (view: ViewId) => void;
   lang: Lang;
 }
 
@@ -169,23 +170,23 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             <div className="grid grid-cols-3 gap-1.5 mt-0.5 px-0.5">
               <button
                 onClick={() => {
-                  onNavigateView('timeline');
+                  onNavigateView('photos');
                   onClose();
                 }}
                 className="p-2 rounded bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-white flex items-center gap-2 border border-zinc-800 transition-colors cursor-pointer text-xs font-mono"
               >
                 <Film className="w-3.5 h-3.5 text-emerald-400" />
-                <span>{t('timeline')}</span>
+                <span>{t('navPhotos')}</span>
               </button>
               <button
                 onClick={() => {
-                  onNavigateView('explorer');
+                  onNavigateView('albums');
                   onClose();
                 }}
                 className="p-2 rounded bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-white flex items-center gap-2 border border-zinc-800 transition-colors cursor-pointer text-xs font-mono"
               >
                 <Tag className="w-3.5 h-3.5 text-amber-400" />
-                <span>{'Explorer'}</span>
+                <span>{t('navAlbums')}</span>
               </button>
               <button
                 onClick={() => {
@@ -195,7 +196,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 className="p-2 rounded bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-white flex items-center gap-2 border border-zinc-800 transition-colors cursor-pointer text-xs font-mono"
               >
                 <Settings className="w-3.5 h-3.5 text-sky-400" />
-                <span>{'Settings'}</span>
+                <span>{t('settingsTitle')}</span>
               </button>
             </div>
           </div>

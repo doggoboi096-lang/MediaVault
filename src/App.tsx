@@ -1,39 +1,51 @@
 import React, { useState, useEffect } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
+import { Loader2, Trash2 } from 'lucide-react';
 import { auth } from './lib/firebase';
-import { translations, Lang } from './lib/i18n';
+import { translations, Lang, fill } from './lib/i18n';
+import {
+  ViewId,
+  Collection,
+  albumCollections,
+  documentCollections,
+  peopleCollections,
+  placeCollections,
+  isScreenshot,
+  exampleSearchTerm,
+} from './lib/collections';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { TimelineView } from './components/TimelineView';
-import { ExplorerView } from './components/ExplorerView';
 import { SettingsView } from './components/SettingsView';
+import {
+  AlbumsView,
+  DocumentsView,
+  PeopleView,
+  PlacesView,
+  CollectionDetail,
+  ActivityView,
+} from './components/CollectionViews';
+import { EmptyState, PageHeader, PillButton, TextButton } from './components/ui';
 import { MediaInspector } from './components/MediaInspector';
 import { OnboardingModal } from './components/OnboardingModal';
 import { UploadModal } from './components/UploadModal';
 import { ArchitectureModal } from './components/ArchitectureModal';
 import { CommandPalette } from './components/CommandPalette';
 import { LoginScreen } from './components/LoginScreen';
-import { 
-  SMART_COLLECTIONS, 
-  INDEXING_ACTIVITIES, 
-  DEFAULT_HARDWARE_STATUS 
-} from './data/mockMedia';
-import { 
-  MediaItem, 
-  SmartCollection, 
-  IndexingActivity, 
-  SystemHardwareStatus, 
-  LibraryScanProgress 
-} from './types';
+import { SMART_COLLECTIONS, INDEXING_ACTIVITIES, DEFAULT_HARDWARE_STATUS } from './data/mockMedia';
+import { MediaItem, SmartCollection, IndexingActivity, SystemHardwareStatus, LibraryScanProgress } from './types';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [currentView, setCurrentView] = useState<'timeline' | 'explorer' | 'settings' | 'trash'>('timeline');
+  const [view, setView] = useState<ViewId>('photos');
+  const [openCollectionId, setOpenCollectionId] = useState<string | null>(null);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [selectedMedia, setSelectedMedia] = useState<MediaItem | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isLoadingMedia, setIsLoadingMedia] = useState(true);
-  
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [settingsFocus, setSettingsFocus] = useState<'hardware' | undefined>(undefined);
+
   // Modals state
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
   const [showUpload, setShowUpload] = useState<boolean>(false);
@@ -56,19 +68,17 @@ export default function App() {
     logMessages: []
   });
 
+  const t = (key: keyof typeof translations.en) => translations[lang][key] || key;
+
   // Auth listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      if (user) {
-        setIsAuthenticated(true);
-      } else {
-        setIsAuthenticated(false);
-      }
+      setIsAuthenticated(!!user);
     });
     return () => unsubscribe();
   }, []);
 
-  // Fetch real telemetry
+  // Real host telemetry (CPU, GPU, drives) for the sidebar storage meter and settings
   useEffect(() => {
     async function fetchSystem() {
       try {
@@ -79,17 +89,9 @@ export default function App() {
             ...prev,
             cpuModel: data.data.cpuModel,
             cpuCores: data.data.cpuCores,
-            ramAppBytes: data.data.ramAppBytes,
-            ramSystemUsedBytes: data.data.ramSystemUsedBytes,
-            ramSystemTotalBytes: data.data.ramSystemTotalBytes,
-            gpuModel: data.data.gpuModel,
             gpuName: data.data.gpuName,
-            cpuUsagePercent: data.data.cpuUsagePercent,
             hwAccelEngine: data.data.hwAccelEngine,
-            storageDrive: data.data.storageDrive,
-            storageTotal: data.data.storageTotal,
-            storageUsed: data.data.storageUsed,
-            storagePercent: typeof data.data.storagePercent === 'number' ? data.data.storagePercent : 0
+            drives: data.data.drives || prev.drives
           }));
         }
       } catch (err) {
@@ -98,7 +100,7 @@ export default function App() {
       }
     }
     fetchSystem();
-    const interval = setInterval(fetchSystem, 1000);
+    const interval = setInterval(fetchSystem, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -133,40 +135,86 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Filter media based on search query and current view
-  const searchedMedia = mediaList.filter((item) => {
-    if (currentView === 'trash') {
-      if (!item.isDeleted) return false;
-    } else {
-      if (item.isDeleted) return false;
+  // ── Derived media sets ────────────────────────────────────────────────────
+  const libraryMedia = mediaList.filter(m => !m.isDeleted);
+  const trashMedia = mediaList.filter(m => m.isDeleted);
+
+  const query = searchQuery.trim().toLowerCase();
+  const searchResults = query
+    ? libraryMedia.filter((item) =>
+        item.title.toLowerCase().includes(query) ||
+        item.filename.toLowerCase().includes(query) ||
+        item.tags.some((tag) => tag.toLowerCase().includes(query)) ||
+        item.location?.name?.toLowerCase().includes(query) ||
+        item.location?.city?.toLowerCase().includes(query) ||
+        item.location?.country?.toLowerCase().includes(query) ||
+        item.exif?.camera?.toLowerCase().includes(query) ||
+        item.detectedObjects?.some((obj) => obj.label.toLowerCase().includes(query)) ||
+        item.ocrData?.extractedText?.some((text) => text.toLowerCase().includes(query)) ||
+        item.ocrText?.toLowerCase().includes(query)
+      )
+    : [];
+
+  const allCollections: Collection[] = [
+    ...albumCollections(libraryMedia, lang),
+    ...documentCollections(libraryMedia, lang),
+    ...peopleCollections(libraryMedia, lang),
+    ...placeCollections(libraryMedia),
+  ];
+  const openCollection = openCollectionId ? allCollections.find(c => c.id === openCollectionId) || null : null;
+
+  const screenshots = libraryMedia.filter(isScreenshot);
+  const favorites = libraryMedia.filter(m => m.isFavorite);
+
+  // The list the inspector's previous / next buttons walk through.
+  const currentList: MediaItem[] = query
+    ? searchResults
+    : openCollection
+      ? openCollection.items
+      : view === 'trash'
+        ? trashMedia
+        : view === 'favorites'
+          ? favorites
+          : view === 'screenshots'
+            ? screenshots
+            : libraryMedia;
+
+  const example = exampleSearchTerm(libraryMedia);
+  const searchPlaceholder = example ? fill(t('searchExample'), { term: example }) : t('searchGeneric');
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+  const goTo = (next: ViewId) => {
+    setView(next);
+    setOpenCollectionId(null);
+    setSearchQuery('');
+    if (next !== 'settings') setSettingsFocus(undefined);
+  };
+
+  const openSettings = (focus?: 'hardware') => {
+    goTo('settings');
+    setSettingsFocus(focus);
+  };
+
+  // ── Media actions ─────────────────────────────────────────────────────────
+  const handleUpdateMedia = async (updatedItem: MediaItem) => {
+    setMediaList(prev => prev.map(m => m.id === updatedItem.id ? updatedItem : m));
+    setSelectedMedia(prev => (prev && prev.id === updatedItem.id ? updatedItem : prev));
+    try {
+      await fetch('/api/media', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item: updatedItem })
+      });
+    } catch (e) {
+      console.error('Failed to persist update', e);
     }
+  };
 
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      item.title.toLowerCase().includes(q) ||
-      item.filename.toLowerCase().includes(q) ||
-      item.tags.some((t) => t.toLowerCase().includes(q)) ||
-      item.location?.name?.toLowerCase().includes(q) ||
-      item.location?.city?.toLowerCase().includes(q) ||
-      item.location?.country?.toLowerCase().includes(q) ||
-      item.exif?.camera?.toLowerCase().includes(q) ||
-      item.detectedObjects?.some((obj) => obj.label.toLowerCase().includes(q)) ||
-      item.ocrData?.extractedText?.some((text) => text.toLowerCase().includes(q))
-    );
-  });
-
-  // Toggle favorite
+  // Favorites are persisted so the Favorites collection survives a reload.
   const handleToggleFavorite = (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    setMediaList((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
-      )
-    );
-    if (selectedMedia && selectedMedia.id === id) {
-      setSelectedMedia((prev) => prev ? { ...prev, isFavorite: !prev.isFavorite } : null);
-    }
+    const item = mediaList.find(m => m.id === id);
+    if (item) handleUpdateMedia({ ...item, isFavorite: !item.isFavorite });
   };
 
   const handleTrashMedia = async (filenames: string[]) => {
@@ -236,24 +284,10 @@ export default function App() {
   };
 
   const handleDeleteMedia = async (id: string, filename: string) => {
-    if (currentView === 'trash') {
+    if (view === 'trash') {
       handlePermanentlyDeleteMedia([filename]);
     } else {
       handleTrashMedia([filename]);
-    }
-  };
-
-  const handleUpdateMedia = async (updatedItem: MediaItem) => {
-    setMediaList(prev => prev.map(m => m.id === updatedItem.id ? updatedItem : m));
-    setSelectedMedia(prev => (prev && prev.id === updatedItem.id ? updatedItem : prev));
-    try {
-      await fetch('/api/media', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item: updatedItem })
-      });
-    } catch(e) {
-      console.error('Failed to persist update', e);
     }
   };
 
@@ -324,7 +358,7 @@ export default function App() {
         setScanProgress((prev) => ({
           ...prev,
           percentage: step.pct,
-          stage: step.stage,
+          stage: step.stage as LibraryScanProgress['stage'],
           isScanning: step.pct < 100,
           scannedCount: Math.floor((step.pct / 100) * 140),
           logMessages: [...prev.logMessages, step.msg]
@@ -341,27 +375,28 @@ export default function App() {
 
   // Inspector next / prev navigation
   const currentIndex = selectedMedia
-    ? searchedMedia.findIndex((m) => m.id === selectedMedia.id)
+    ? currentList.findIndex((m) => m.id === selectedMedia.id)
     : -1;
 
   const handlePrevMedia = () => {
     if (currentIndex > 0) {
-      setSelectedMedia(searchedMedia[currentIndex - 1]);
-    } else if (searchedMedia.length > 0) {
-      setSelectedMedia(searchedMedia[searchedMedia.length - 1]);
+      setSelectedMedia(currentList[currentIndex - 1]);
+    } else if (currentList.length > 0) {
+      setSelectedMedia(currentList[currentList.length - 1]);
     }
   };
 
   const handleNextMedia = () => {
-    if (currentIndex >= 0 && currentIndex < searchedMedia.length - 1) {
-      setSelectedMedia(searchedMedia[currentIndex + 1]);
-    } else if (searchedMedia.length > 0) {
-      setSelectedMedia(searchedMedia[0]);
+    if (currentIndex >= 0 && currentIndex < currentList.length - 1) {
+      setSelectedMedia(currentList[currentIndex + 1]);
+    } else if (currentList.length > 0) {
+      setSelectedMedia(currentList[0]);
     }
   };
 
-  // Smart collection click handler
+  // Smart collection click handler (command palette)
   const handleSelectCollection = (col: SmartCollection) => {
+    goTo('photos');
     if (col.id === 'col-id') {
       setSearchQuery('Passport');
     } else if (col.id === 'col-doc') {
@@ -369,18 +404,140 @@ export default function App() {
     } else if (col.id === 'col-vid') {
       setSearchQuery('mp4');
     }
-    setCurrentView('timeline');
   };
-
-  const t = (key: keyof typeof translations.en) => translations[lang][key] || key;
 
   if (!isAuthenticated) {
     return <LoginScreen onLoginSuccess={() => setIsAuthenticated(true)} lang={lang} setLang={setLang} />;
   }
 
+  // ── Page rendering ────────────────────────────────────────────────────────
+  const grid = (items: MediaItem[], emptyState: React.ReactNode, opts: { showFilters?: boolean; mode?: 'library' | 'trash' } = {}) => (
+    <TimelineView
+      media={items}
+      onSelectMedia={setSelectedMedia}
+      onToggleFavorite={handleToggleFavorite}
+      lang={lang}
+      mode={opts.mode}
+      showFilters={opts.showFilters}
+      emptyState={emptyState}
+      onTrash={handleTrashMedia}
+      onRestore={handleRestoreMedia}
+      onPermanentDelete={handlePermanentlyDeleteMedia}
+      onUpdateMedia={handleUpdateMedia}
+    />
+  );
+
+  const uploadButton = (
+    <PillButton variant="filled" onClick={() => setShowUpload(true)}>{t('uploadPhotos')}</PillButton>
+  );
+
+  const renderPage = (): React.ReactNode => {
+    if (isLoadingMedia) {
+      return (
+        <div className="h-full flex items-center justify-center">
+          <Loader2 className="w-8 h-8 text-accent animate-spin" />
+        </div>
+      );
+    }
+
+    if (query) {
+      return (
+        <>
+          <PageHeader
+            title={fill(t('searchResultsFor'), { q: searchQuery.trim() })}
+            onBack={() => setSearchQuery('')}
+            backLabel={t('clearSearch')}
+          />
+          {grid(searchResults, <EmptyState illustration="search" title={t('searchEmptyTitle')} description={t('searchEmptyDesc')} />)}
+        </>
+      );
+    }
+
+    if (openCollection) {
+      return (
+        <CollectionDetail title={openCollection.title} badge={t('autoAlbum')} onBack={() => setOpenCollectionId(null)} lang={lang}>
+          {grid(
+            openCollection.items,
+            <EmptyState illustration={openCollection.illustration} title={t('collectionEmptyTitle')} description={t('collectionEmptyDesc')} />
+          )}
+        </CollectionDetail>
+      );
+    }
+
+    const openById = (c: Collection) => setOpenCollectionId(c.id);
+
+    switch (view) {
+      case 'photos':
+        return grid(
+          libraryMedia,
+          <EmptyState illustration="photos" title={t('photosEmptyTitle')} description={t('photosEmptyDesc')} action={uploadButton} />,
+          { showFilters: true }
+        );
+      case 'activity':
+        return <ActivityView activities={activities} lang={lang} />;
+      case 'albums':
+        return <AlbumsView media={libraryMedia} lang={lang} onOpen={openById} onUpload={() => setShowUpload(true)} />;
+      case 'documents':
+        return <DocumentsView media={libraryMedia} lang={lang} onOpen={openById} />;
+      case 'screenshots':
+        return (
+          <CollectionDetail title={t('navScreenshots')} badge={t('autoAlbum')} lang={lang}>
+            {grid(screenshots, <EmptyState illustration="screenshot" title={t('collectionEmptyTitle')} description={t('collectionEmptyDesc')} />)}
+          </CollectionDetail>
+        );
+      case 'favorites':
+        return (
+          <CollectionDetail title={t('navFavorites')} lang={lang}>
+            {grid(favorites, <EmptyState illustration="favorites" title={t('favoritesEmptyTitle')} description={t('favoritesEmptyDesc')} />)}
+          </CollectionDetail>
+        );
+      case 'people':
+        return <PeopleView media={libraryMedia} lang={lang} onOpen={openById} />;
+      case 'places':
+        return <PlacesView media={libraryMedia} lang={lang} onOpen={openById} />;
+      case 'trash':
+        return (
+          <>
+            <PageHeader
+              title={t('navTrash')}
+              actions={
+                trashMedia.length > 0 && (
+                  <TextButton
+                    tone="danger"
+                    icon={<Trash2 className="w-[18px] h-[18px]" />}
+                    onClick={() => {
+                      if (window.confirm(t('confirmEmptyTrash'))) handleEmptyTrash();
+                    }}
+                  >
+                    {t('emptyTrash')}
+                  </TextButton>
+                )
+              }
+            />
+            {grid(trashMedia, <EmptyState illustration="trash" title={t('trashEmptyTitle')} description={t('trashEmptyDesc')} />, { mode: 'trash' })}
+          </>
+        );
+      case 'settings':
+        return (
+          <SettingsView
+            hwStatus={hwStatus}
+            currentLibraryPath={currentLibraryPath}
+            onUpdateLibraryPath={setCurrentLibraryPath}
+            onTriggerScan={() => setShowOnboarding(true)}
+            onOpenProjectInfo={() => setShowArchitecture(true)}
+            lang={lang}
+            setLang={setLang}
+            initialOpen={settingsFocus}
+          />
+        );
+    }
+  };
+
+  const pageKey = query ? 'search' : openCollection ? `c:${openCollection.id}` : view;
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 font-sans antialiased">
-      {/* If media inspector is open, render full inspector */}
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-shell text-ink font-sans antialiased">
+      {/* The photo inspector keeps its own full-screen layout */}
       {selectedMedia ? (
         <MediaInspector
           item={selectedMedia}
@@ -393,76 +550,38 @@ export default function App() {
           onRestore={(id, filename) => handleRestoreMedia([filename])}
           onPermanentDelete={(id, filename) => handlePermanentlyDeleteMedia([filename])}
           onUpdateMedia={handleUpdateMedia}
-          currentView={currentView}
+          currentView={view}
           lang={lang}
         />
       ) : (
         <>
-          {/* Left Navigation Sidebar */}
-          <Sidebar
-            currentView={currentView}
-            onViewChange={setCurrentView}
+          <Header
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            placeholder={searchPlaceholder}
             onOpenUpload={() => setShowUpload(true)}
-            onOpenArchitecture={() => setShowArchitecture(true)}
-            hwStatus={hwStatus}
+            onOpenSettings={() => openSettings()}
+            onOpenProjectInfo={() => setShowArchitecture(true)}
+            onToggleSidebar={() => setSidebarOpen(v => !v)}
             lang={lang}
+            setLang={setLang}
           />
-
-          {/* Main Content Area */}
-          <main className="flex-1 flex flex-col h-screen overflow-hidden bg-zinc-950">
-            {/* Top Search & Controls Header */}
-            <Header
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              onOpenCommandPalette={() => setShowCommandPalette(true)}
-              onOpenUpload={() => setShowUpload(true)}
-              activities={activities}
+          <div className="flex flex-1 min-h-0">
+            <Sidebar
+              currentView={view}
+              onViewChange={goTo}
+              onManageStorage={() => openSettings('hardware')}
               hwStatus={hwStatus}
               lang={lang}
-              setLang={setLang}
+              open={sidebarOpen}
+              onClose={() => setSidebarOpen(false)}
             />
-
-            {/* Viewport Router */}
-            <div className="flex-1 overflow-y-auto">
-              {(currentView === 'timeline' || currentView === 'trash') && (
-                <TimelineView
-                  media={searchedMedia}
-                  onSelectMedia={setSelectedMedia}
-                  onToggleFavorite={handleToggleFavorite}
-                  hwStatus={hwStatus}
-                  lang={lang}
-                  currentView={currentView}
-                  onTrash={handleTrashMedia}
-                  onRestore={handleRestoreMedia}
-                  onPermanentDelete={handlePermanentlyDeleteMedia}
-                  onEmptyTrash={handleEmptyTrash}
-                  onUpdateMedia={handleUpdateMedia}
-                />
-              )}
-
-              {currentView === 'explorer' && (
-                <ExplorerView
-                  activities={activities}
-                  mediaItems={searchedMedia}
-                  onQuickFilter={(q) => {
-                    setSearchQuery(q);
-                    setCurrentView('timeline');
-                  }}
-                  lang={lang}
-                />
-              )}
-
-              {currentView === 'settings' && (
-                <SettingsView
-                  hwStatus={hwStatus}
-                  currentLibraryPath={currentLibraryPath}
-                  onUpdateLibraryPath={setCurrentLibraryPath}
-                  onTriggerScan={() => setShowOnboarding(true)}
-                  lang={lang}
-                />
-              )}
-            </div>
-          </main>
+            <main className="flex-1 min-w-0 mx-2 mb-2 lg:ml-0 lg:mr-4 lg:mb-4 rounded-3xl bg-panel overflow-hidden flex flex-col">
+              <div key={pageKey} className="flex-1 overflow-y-auto">
+                {renderPage()}
+              </div>
+            </main>
+          </div>
         </>
       )}
 
@@ -491,11 +610,11 @@ export default function App() {
       <CommandPalette
         isOpen={showCommandPalette}
         onClose={() => setShowCommandPalette(false)}
-        media={mediaList}
+        media={libraryMedia}
         collections={collections}
         onSelectMedia={(item) => setSelectedMedia(item)}
         onSelectCollection={handleSelectCollection}
-        onNavigateView={(view) => setCurrentView(view)}
+        onNavigateView={goTo}
         lang={lang}
       />
     </div>

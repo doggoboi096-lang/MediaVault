@@ -287,10 +287,10 @@ async function startServer() {
 
     const drives = [];
 
-    // Primary Drive
+    // Primary Drive: the configured library, or the drive holding media_uploads when that path doesn't exist here
     try {
-      if (!fs.existsSync(currentLibraryPath)) throw new Error('Path not found');
-      const statFsResult = fs.statfsSync(currentLibraryPath);
+      const primaryPath = fs.existsSync(currentLibraryPath) ? currentLibraryPath : mediaDir;
+      const statFsResult = fs.statfsSync(primaryPath);
       const bsize = statFsResult.bsize || 4096;
       const totalBytes = Number(statFsResult.blocks) * bsize;
       const freeBytes = Number(statFsResult.bfree) * bsize;

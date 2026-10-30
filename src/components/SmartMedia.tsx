@@ -6,13 +6,11 @@ interface SmartMediaProps {
   item?: MediaItem | null;
   className?: string;
   useFullUrl?: boolean;
+  /** 'cover' crops to fill grid tiles; the inspector keeps the default 'contain'. */
+  fit?: 'contain' | 'cover';
 }
 
-
-
-
-
-export const SmartMedia: React.FC<SmartMediaProps> = ({ item, className = '', useFullUrl = false }) => {
+export const SmartMedia: React.FC<SmartMediaProps> = ({ item, className = '', useFullUrl = false, fit = 'contain' }) => {
   if (!item) {
     return (
       <div className={`flex items-center justify-center bg-zinc-800 text-zinc-500 ${className}`}>
@@ -29,6 +27,7 @@ export const SmartMedia: React.FC<SmartMediaProps> = ({ item, className = '', us
         poster={item.previewUrl || item.thumbnailUrl}
         preload="metadata"
         className={className}
+        style={{ objectFit: fit }}
         muted
         playsInline
       />
@@ -47,7 +46,7 @@ export const SmartMedia: React.FC<SmartMediaProps> = ({ item, className = '', us
       alt={item.title || item.filename || 'media'}
       loading="lazy"
       className={className}
-      style={{ ...rotationStyle, objectFit: 'contain' }}
+      style={{ ...rotationStyle, objectFit: fit }}
     />
   );
 };

@@ -1,1 +1,48 @@
 @import "tailwindcss";
+
+/* MediaVault tonal dark theme: lighter shell around a darker content panel. */
+@theme {
+  --font-sans: "Be Vietnam Pro", ui-sans-serif, system-ui, sans-serif;
+
+  --color-shell: #1c1d1f;
+  --color-panel: #121314;
+  --color-tile: #25272a;
+  --color-tile-hover: #2e3034;
+  --color-line: #3a3d42;
+  --color-ink: #e3e4e6;
+  --color-ink-muted: #a3a7ad;
+  --color-ink-faint: #74787e;
+  --color-accent: #a8c3ff;
+  --color-accent-strong: #7fa6f5;
+  --color-accent-container: #203a62;
+  --color-on-accent-container: #d8e4ff;
+  --color-on-accent: #0b1f44;
+}
+
+@layer base {
+  html,
+  body {
+    background: var(--color-shell);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  * {
+    scrollbar-color: #4a4d52 transparent;
+    scrollbar-width: thin;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

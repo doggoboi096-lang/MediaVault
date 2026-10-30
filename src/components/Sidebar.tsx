@@ -1,199 +1,130 @@
 import React from 'react';
-import { 
-  Film, 
-  FolderSearch, 
-  Settings as SettingsIcon, 
-  Upload, 
-  Layers, 
-  Cpu, 
-  ShieldCheck, 
-  HardDrive,
-  Sparkles,
-  MapPin,
-  Smile,
-  Trash2,
-  Info
-} from 'lucide-react';
+import { Image, Bell, BookImage, FileText, Smartphone, Star, Smile, MapPin, Trash2, HardDrive, Settings } from 'lucide-react';
 import { SystemHardwareStatus } from '../types';
-import { translations, Lang } from '../lib/i18n';
+import { translations, Lang, fill, formatBytes } from '../lib/i18n';
+import { ViewId } from '../lib/collections';
+import { BrandMark } from './Header';
 
 interface SidebarProps {
-  currentView: 'timeline' | 'explorer' | 'settings' | 'trash';
-  onViewChange: (view: 'timeline' | 'explorer' | 'settings' | 'trash') => void;
-  onOpenUpload: () => void;
-  onOpenArchitecture: () => void;
+  currentView: ViewId;
+  onViewChange: (view: ViewId) => void;
+  onManageStorage: () => void;
   hwStatus: SystemHardwareStatus;
   lang: Lang;
+  /** Drawer state below the lg breakpoint. */
+  open: boolean;
+  onClose: () => void;
 }
+
+type NavKey = keyof typeof translations.en;
+
+const PRIMARY: { view: ViewId; label: NavKey; icon: React.ElementType }[] = [
+  { view: 'photos', label: 'navPhotos', icon: Image },
+  { view: 'activity', label: 'navActivity', icon: Bell },
+];
+
+const COLLECTIONS: { view: ViewId; label: NavKey; icon: React.ElementType }[] = [
+  { view: 'albums', label: 'navAlbums', icon: BookImage },
+  { view: 'documents', label: 'navDocuments', icon: FileText },
+  { view: 'screenshots', label: 'navScreenshots', icon: Smartphone },
+  { view: 'favorites', label: 'navFavorites', icon: Star },
+  { view: 'people', label: 'navPeople', icon: Smile },
+  { view: 'places', label: 'navPlaces', icon: MapPin },
+  { view: 'trash', label: 'navTrash', icon: Trash2 },
+];
 
 export const Sidebar: React.FC<SidebarProps> = ({
   currentView,
   onViewChange,
-  onOpenUpload,
-  onOpenArchitecture,
+  onManageStorage,
   hwStatus,
-  lang
+  lang,
+  open,
+  onClose,
 }) => {
-  const t = (key: keyof typeof translations.en) => translations[lang][key] || key;
+  const t = (key: NavKey) => translations[lang][key] || key;
 
-  const formatBytes = (bytes: number) => {
-    if (bytes == null || isNaN(bytes)) return '0 GB';
-    if (bytes < 1024 ** 2) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 ** 3) return (bytes / (1024 ** 2)).toFixed(1) + ' MB';
-    return (bytes / (1024 ** 3)).toFixed(1) + ' GB';
+  const drives = hwStatus.drives || [];
+  const used = drives.reduce((s, d) => s + d.usedBytes, 0);
+  const total = drives.reduce((s, d) => s + d.totalBytes, 0);
+  const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+
+  const renderNavItem = ({ view, label, icon: Icon }: { view: ViewId; label: NavKey; icon: React.ElementType }) => {
+    const active = currentView === view;
+    return (
+      <button
+        key={view}
+        type="button"
+        id={`nav-${view}`}
+        onClick={() => {
+          onViewChange(view);
+          onClose();
+        }}
+        aria-current={active ? 'page' : undefined}
+        className={`w-full min-h-12 flex items-center gap-5 pl-6 pr-4 py-2.5 rounded-full text-left text-[15px] transition-colors cursor-pointer ${
+          active ? 'bg-accent-container text-on-accent-container font-semibold' : 'text-ink hover:bg-tile-hover'
+        }`}
+      >
+        <Icon className="w-[22px] h-[22px] flex-shrink-0" strokeWidth={active ? 2.2 : 1.8} />
+        <span className="leading-snug">{t(label)}</span>
+      </button>
+    );
   };
 
   return (
-    <aside 
-      id="sidebar-main"
-      className="w-60 flex-shrink-0 bg-zinc-900 border-r border-zinc-800 flex flex-col justify-between h-screen select-none z-30"
-    >
-      {/* Top Header & Brand */}
-      <div className="flex flex-col flex-1 overflow-hidden">
-        {/* Brand Header */}
-        <div className="p-4 border-b border-zinc-800 flex items-center gap-2.5">
-          <div className="w-8 h-8 bg-emerald-500 rounded flex items-center justify-center text-zinc-950 font-bold shadow-sm shadow-emerald-500/20 text-base">
-            Σ
-          </div>
-          <div>
-            <span className="font-bold text-zinc-100 tracking-tight text-sm block leading-tight">MEDIAVAULT</span>
-            <span className="text-[10px] text-emerald-400 font-mono font-medium block">HIGH DENSITY NODE</span>
-          </div>
+    <>
+      {open && <div className="fixed inset-0 bg-black/60 z-30 lg:hidden" onClick={onClose} aria-hidden="true" />}
+      <aside
+        id="sidebar-main"
+        className={`w-[264px] flex-shrink-0 flex flex-col bg-shell select-none z-40
+          fixed inset-y-0 left-0 transition-transform lg:static lg:translate-x-0
+          ${open ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}`}
+      >
+        <div className="lg:hidden h-16 flex items-center gap-2.5 pl-6 flex-shrink-0">
+          <BrandMark />
+          <span className="text-[22px] text-ink tracking-tight">MediaVault</span>
         </div>
+        <nav className="flex-1 overflow-y-auto pl-2 pr-3 pb-4 pt-2" aria-label="Main navigation">
+          {PRIMARY.map(renderNavItem)}
+          {/* The header hides its gear below sm, so the drawer carries Settings there */}
+          <div className="sm:hidden">{renderNavItem({ view: 'settings', label: 'settingsTitle', icon: Settings })}</div>
 
-        {/* Navigation Menu */}
-        <nav className="flex-1 py-4 overflow-y-auto px-2 space-y-1" aria-label="Main Navigation">
-          <div className="text-[10px] uppercase font-bold text-zinc-500 px-3 py-1.5 tracking-widest">
-            {t('library')}
-          </div>
-          <button
-            id="nav-timeline"
-            onClick={() => onViewChange('timeline')}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-              currentView === 'timeline'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold'
-                : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60'
-            }`}
-          >
-            <Film className="w-4 h-4 flex-shrink-0" />
-            <span>{t('allPhotosAndVideos')}</span>
-          </button>
+          <h2 className="text-[15px] font-medium text-ink pl-6 pt-7 pb-3">{t('navCollections')}</h2>
+          {COLLECTIONS.map(renderNavItem)}
 
-          <button
-            id="nav-explorer"
-            onClick={() => onViewChange('explorer')}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-              currentView === 'explorer'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold'
-                : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60'
-            }`}
-          >
-            <FolderSearch className="w-4 h-4 flex-shrink-0" />
-            <span>{t('albumsAndCollections')}</span>
-          </button>
+          <div className="mx-4 my-5 h-px bg-line" />
 
-          <button
-            id="nav-trash"
-            onClick={() => onViewChange('trash')}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-              currentView === 'trash'
-                ? 'bg-zinc-800 text-red-400 font-semibold'
-                : 'text-zinc-400 hover:text-red-400 hover:bg-red-500/10'
-            }`}
-          >
-            <Trash2 className="w-4 h-4 flex-shrink-0" />
-            <span>Recently Deleted</span>
-          </button>
-          <button
-            id="nav-settings"
-            onClick={() => onViewChange('settings')}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-              currentView === 'settings'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold'
-                : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60'
-            }`}
-          >
-            <SettingsIcon className="w-4 h-4 flex-shrink-0" />
-            <span>{t('nodeSettings')}</span>
-          </button>
-
-          <div className="pt-4 text-[10px] uppercase font-bold text-zinc-500 px-3 py-1.5 tracking-widest">
-            {t('aiInsights')}
-          </div>
-
-          <button
-            onClick={() => onViewChange('explorer')}
-            className="w-full flex items-center gap-3 px-3 py-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 rounded-md text-sm transition-colors cursor-pointer"
-          >
-            <Sparkles className="w-4 h-4 flex-shrink-0 text-emerald-400" />
-            <span>{t('objectDetection')}</span>
-          </button>
-
-          <button
-            onClick={() => onViewChange('timeline')}
-            className="w-full flex items-center gap-3 px-3 py-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 rounded-md text-sm transition-colors cursor-pointer"
-          >
-            <MapPin className="w-4 h-4 flex-shrink-0 text-sky-400" />
-            <span>{t('gpsGeotagsMap')}</span>
-          </button>
-
-          {/* Project Info for Judges button */}
-          <div className="pt-3 px-1">
-            <button
-              id="nav-architecture"
-              onClick={onOpenArchitecture}
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-md font-medium text-xs text-amber-300 hover:text-amber-100 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 transition-all shadow-sm shadow-amber-950/40 cursor-pointer group"
+          <div className="px-4">
+            <div className="flex items-center gap-5 pl-2 text-[15px] text-ink">
+              <HardDrive className="w-[22px] h-[22px]" strokeWidth={1.8} />
+              <span>{t('navStorage')}</span>
+            </div>
+            <div
+              className="mt-4 h-1 rounded-full bg-line overflow-hidden"
+              role="progressbar"
+              aria-valuenow={pct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={t('navStorage')}
             >
-              <Info className="w-4 h-4 text-amber-400 flex-shrink-0 group-hover:scale-110 transition-transform" />
-              <span className="font-semibold">{t('architecture')}</span>
+              <div className="h-full bg-accent rounded-full" style={{ width: `${Math.max(pct, total ? 2 : 0)}%` }} />
+            </div>
+            <p className="text-sm text-ink-muted mt-2.5">
+              {total > 0 ? fill(t('storageUsedOf'), { used: formatBytes(used), total: formatBytes(total) }) : '…'}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                onManageStorage();
+                onClose();
+              }}
+              className="mt-4 w-full h-10 rounded-full border border-ink-faint text-sm font-medium text-accent hover:bg-accent/10 transition-colors cursor-pointer"
+            >
+              {t('manageStorage')}
             </button>
           </div>
         </nav>
-      </div>
-
-      {/* Node Status & Upload Button Area */}
-      <div className="p-4 bg-zinc-950 border-t border-zinc-800 text-[11px] space-y-3">
-        {/* Storage Bars */}
-        {hwStatus.drives?.map((drive, idx) => (
-          <div key={idx}>
-            <div className="flex justify-between mb-1.5 text-zinc-400">
-              <span className="truncate max-w-[140px]">{drive.name} {formatBytes(drive.usedBytes)} / {formatBytes(drive.totalBytes)}</span>
-              <span className="font-mono text-emerald-400 font-semibold">{drive.percentage}%</span>
-            </div>
-            <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
-              <div className="bg-emerald-500 h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(drive.percentage || 0, 100)}%` }}></div>
-            </div>
-          </div>
-        ))}
-
-        {/* Tailscale Status */}
-        <div className="space-y-1.5 pt-1">
-          <div className="flex items-center justify-between text-zinc-400">
-            <div className="flex items-center gap-2 text-emerald-400">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-              <span>{t('tailscaleConnected')}</span>
-            </div>
-            <span className="font-mono text-[10px] text-zinc-400">{hwStatus.vpnMesh?.virtualIp}</span>
-          </div>
-          
-          <div className="flex items-center justify-between text-zinc-400">
-            <div className="flex items-center gap-2 overflow-hidden">
-              <Cpu className="w-3 h-3 text-sky-400 flex-shrink-0" />
-              <span className="truncate text-[10px]" title={`NVENC Active: ${hwStatus.gpuName || 'Unknown GPU'}`}>NVENC Active: {hwStatus.gpuName || 'Unknown GPU'}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Upload Media Button */}
-        <button
-          id="btn-upload-media-sidebar"
-          onClick={onOpenUpload}
-          className="w-full mt-2 py-2 px-3 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-sm shadow-emerald-900/30"
-        >
-          <Upload className="w-3.5 h-3.5" />
-          <span>{t('uploadMedia')}</span>
-        </button>
-      </div>
-    </aside>
+      </aside>
+    </>
   );
 };

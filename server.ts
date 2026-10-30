@@ -15,7 +15,7 @@ import { createServer as createViteServer } from 'vite';
 import { INITIAL_MEDIA } from './src/data/mockMedia';
 import { analyzeMediaHybrid } from './src/services/local_ai.ts';
 import { startAiRuntime, aiStatus } from './src/services/ai_runtime.ts';
-import { authRouter, requireAuth } from './src/server/auth.ts';
+import { authRouter, checkAuthConfig, requireAuth } from './src/server/auth.ts';
 import { PathError, isInside, safeFilename, sanitizeUploadName, validateLibraryRoot } from './src/server/safePath.ts';
 import { audit, configureAudit } from './src/server/audit.ts';
 
@@ -197,7 +197,12 @@ function blockPrivateFiles(dataDir: string): express.RequestHandler {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+  // Localhost only by default; remote devices reach the app through `tailscale serve`.
+  const HOST = process.env.HOST || '127.0.0.1';
+  checkAuthConfig(HOST);
+  // Trust X-Forwarded-For only from the local proxy (tailscale serve), so rate limits see the real client.
+  app.set('trust proxy', 'loopback');
 
   // Directories & index paths
   const DATA_DIR = path.resolve(process.env.DATA_DIR || process.cwd());
@@ -1198,11 +1203,15 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`MediaVault server listening at http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`MediaVault server listening at http://${HOST}:${PORT}`);
     // Boot the local AI runtime in the background; uploads wait for it via analyzeMediaHybrid.
     startAiRuntime().catch(() => { /* status already logged; retried on next upload */ });
   });
 }
 
-startServer();
+startServer().catch(err => {
+  // Configuration errors (e.g. AUTH_DISABLED with a public HOST) stop the process before it listens.
+  console.error('[STARTUP] ' + (err?.message || err));
+  process.exit(1);
+});

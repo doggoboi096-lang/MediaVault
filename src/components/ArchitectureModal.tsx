@@ -212,7 +212,7 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({
                   : 'High-throughput stream I/O, clean in-place file overwrite on duplicate upload, and fast JSON/SQLite indexing.'}
               </p>
               <div className="p-2.5 rounded bg-zinc-900 font-mono text-[10px] text-zinc-300 space-y-0.5 border border-zinc-800">
-                <p className="text-emerald-400">POST /api/analyze-media (AI Ingestion)</p>
+                <p className="text-emerald-400">POST /api/media/upload (nhận file, AI chạy nền)</p>
                 <p className="text-emerald-400">GET /api/system (Real Telemetry)</p>
                 <p className="text-amber-400">PATCH /api/media (Instant Tag & Date Edit)</p>
               </div>

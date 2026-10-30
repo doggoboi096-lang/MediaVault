@@ -164,7 +164,7 @@ async function main() {
     form.append('files', new Blob([PNG], { type: 'image/png' }), 'intruder.png');
     let r10status = 0;
     try {
-      r10status = (await fetch(`${BASE}/api/analyze-media`, { method: 'POST', body: form })).status;
+      r10status = (await fetch(`${BASE}/api/media/upload`, { method: 'POST', body: form })).status;
     } catch (e: any) {
       r10status = -1;
     }

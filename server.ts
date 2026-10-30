@@ -1,25 +1,18 @@
 import 'dotenv/config';
-import heicConvert from 'heic-convert';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { execFile, execFileSync, execSync } from 'child_process';
-import util from 'util';
-import ffmpegPath from 'ffmpeg-static';
-import ffprobeStatic from 'ffprobe-static';
+import { execSync } from 'child_process';
 import multer from 'multer';
-import exifr from 'exifr';
 import { createServer as createViteServer } from 'vite';
-import { analyzeMediaHybrid } from './src/services/local_ai.ts';
 import { startAiRuntime, aiStatus } from './src/services/ai_runtime.ts';
 import { authRouter, checkAuthConfig, requireAuth } from './src/server/auth.ts';
 import { PathError, isInside, safeFilename, sanitizeUploadName, validateLibraryRoot } from './src/server/safePath.ts';
 import { audit, configureAudit } from './src/server/audit.ts';
 import {
   addLibraryRoot,
-  findDuplicate,
   getLibraryRoots,
   getMedia,
   getMediaByFilename,
@@ -32,211 +25,19 @@ import {
   trashedFilenames,
   updateMedia,
 } from './src/server/db.ts';
-import { hasAiResults, migrateLegacyJson } from './src/server/migrate.ts';
-
-// Patch exifr parser limitation for modern HEIF/HEIC/AVIF files with header > 50 bytes
-try {
-  const heicParser: any = exifr.fileParsers?.get('heic');
-  if (heicParser) {
-    heicParser.canHandle = function (file: any, firstTwoBytes: number) {
-      if (firstTwoBytes !== 0) return false;
-      const ftypLength = file.getUint16(2);
-      if (ftypLength > 1024) return false;
-      let offset = 16;
-      const compatibleBrands: string[] = [];
-      while (offset < ftypLength) {
-        compatibleBrands.push(file.getString(offset, 4));
-        offset += 4;
-      }
-      return (
-        compatibleBrands.includes(this.type) ||
-        compatibleBrands.includes('heic') ||
-        compatibleBrands.includes('heix') ||
-        compatibleBrands.includes('mif1') ||
-        compatibleBrands.includes('msf1') ||
-        compatibleBrands.includes('hevc') ||
-        compatibleBrands.includes('hevx') ||
-        compatibleBrands.includes('heim') ||
-        compatibleBrands.includes('heis') ||
-        compatibleBrands.includes('hevm') ||
-        compatibleBrands.includes('hevs') ||
-        compatibleBrands.includes('miaf') ||
-        compatibleBrands.includes('MiHB') ||
-        compatibleBrands.includes('MiHA') ||
-        compatibleBrands.includes('MiHE') ||
-        compatibleBrands.includes('MiPr') ||
-        compatibleBrands.includes('tmap')
-      );
-    };
-  }
-
-  const avifParser: any = exifr.fileParsers?.get('avif');
-  if (avifParser) {
-    avifParser.canHandle = function (file: any, firstTwoBytes: number) {
-      if (firstTwoBytes !== 0) return false;
-      const ftypLength = file.getUint16(2);
-      if (ftypLength > 1024) return false;
-      let offset = 16;
-      const compatibleBrands: string[] = [];
-      while (offset < ftypLength) {
-        compatibleBrands.push(file.getString(offset, 4));
-        offset += 4;
-      }
-      return (
-        compatibleBrands.includes(this.type) ||
-        compatibleBrands.includes('avif') ||
-        compatibleBrands.includes('avis') ||
-        compatibleBrands.includes('mif1')
-      );
-    };
-  }
-} catch (patchErr) {
-  console.warn('Could not patch exifr parsers:', patchErr);
-}
-
-function extractRealDate(realExif: any, stat: fs.Stats, clientDateMs?: number) {
-  const timestamps: number[] = [];
-
-  if (realExif?.DateTimeOriginal) timestamps.push(new Date(realExif.DateTimeOriginal).getTime());
-  if (realExif?.CreateDate) timestamps.push(new Date(realExif.CreateDate).getTime());
-  if (realExif?.ModifyDate) timestamps.push(new Date(realExif.ModifyDate).getTime());
-
-  if (clientDateMs) {
-    timestamps.push(clientDateMs);
-  } else {
-    if (stat?.birthtimeMs) timestamps.push(stat.birthtimeMs);
-    if (stat?.mtimeMs) timestamps.push(stat.mtimeMs);
-    if (stat?.ctimeMs) timestamps.push(stat.ctimeMs);
-  }
-
-  const validTimestamps = timestamps.filter(t => t && !isNaN(t) && t > 1000000000);
-  const realDateTimestamp = validTimestamps.length > 0 ? Math.min(...validTimestamps) : Date.now();
-
-  const realDateIso = new Date(realDateTimestamp).toISOString();
-  return {
-    timestamp: realDateTimestamp,
-    iso: realDateIso,
-    date: realDateIso.split('T')[0],
-    dateFormatted: new Date(realDateTimestamp).toLocaleDateString(),
-    dateTaken: realDateIso.replace('T', ' ').substring(0, 19)
-  };
-}
-
-function formatExifData(realExif: any, stat: fs.Stats, ext: string, dateTaken: string, metadataExif: any = {}) {
-  const imgWidth = realExif?.ExifImageWidth || realExif?.ImageWidth || null;
-  const imgHeight = realExif?.ExifImageHeight || realExif?.ImageHeight || null;
-
-  let shutterFormatted = '';
-  if (realExif?.ExposureTime) {
-    shutterFormatted = realExif.ExposureTime < 1 ? `1/${Math.round(1 / realExif.ExposureTime)}s` : `${parseFloat(Number(realExif.ExposureTime).toFixed(2))}s`;
-  } else if (metadataExif?.shutter) {
-    shutterFormatted = metadataExif.shutter;
-  }
-
-  let apertureFormatted = '';
-  if (realExif?.FNumber) {
-    apertureFormatted = `f/${parseFloat(Number(realExif.FNumber).toFixed(2))}`;
-  } else if (metadataExif?.aperture) {
-    apertureFormatted = metadataExif.aperture;
-  }
-
-  let focalFormatted = '';
-  if (realExif?.FocalLength) {
-    focalFormatted = `${parseFloat(Number(realExif.FocalLength).toFixed(1))}mm`;
-  }
-
-  let colorSpaceFormatted = 'Uncalibrated';
-  if (realExif?.ColorSpace === 1 || realExif?.ColorSpace === 'sRGB') {
-    colorSpaceFormatted = 'sRGB';
-  } else if (realExif?.ProfileDescription) {
-    colorSpaceFormatted = realExif.ProfileDescription;
-  }
-
-  return {
-    camera: realExif?.Make ? `${realExif.Make} ${realExif.Model || ''}`.trim() : (metadataExif?.camera || ''),
-    lens: realExif?.LensModel || metadataExif?.lens || '',
-    aperture: apertureFormatted,
-    shutter: shutterFormatted,
-    iso: realExif?.ISO || metadataExif?.iso || 0,
-    focalLength: focalFormatted,
-    dimensions: imgWidth && imgHeight ? `${imgWidth} x ${imgHeight}` : '',
-    width: imgWidth,
-    height: imgHeight,
-    size: (stat.size / (1024 * 1024)).toFixed(2) + ' MB',
-    sizeBytes: stat.size,
-    colorSpace: colorSpaceFormatted,
-    dateTaken,
-    format: ext.toUpperCase().replace('.', '')
-  };
-}
-
-export async function convertHeicToJpegWithExif(heicBufferOrPath: Buffer | string, quality = 0.88): Promise<Buffer> {
-  const heicBuf = typeof heicBufferOrPath === 'string' ? fs.readFileSync(heicBufferOrPath) : heicBufferOrPath;
-  const rawJpg = await heicConvert({ buffer: heicBuf, format: 'JPEG', quality });
-  return Buffer.from(rawJpg);
-}
-
-
-
-
-
-
-const SUPPORTED_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.webm', '.heic', '.webp'];
-const VIDEO_EXTS = ['.mp4', '.mov', '.webm'];
-
-/**
- * Brings media_uploads and the database in line at startup: files dropped into the folder
- * by hand are registered (AI pending), and uploads whose file is gone are removed.
- * Scanned items are left alone even if their drive is offline.
- */
-async function syncUploadsFolder(mediaDir: string) {
-  const missing = listMedia()
-    .filter(i => isInside(i.path, mediaDir) && !fs.existsSync(i.path))
-    .map(i => i.filename);
-  if (missing.length) {
-    removeMedia(missing);
-    console.log(`[DB] Removed ${missing.length} uploads whose file no longer exists`);
-  }
-
-  let added = 0;
-  for (const file of fs.readdirSync(mediaDir)) {
-    const ext = path.extname(file).toLowerCase();
-    const filePath = path.join(mediaDir, file);
-    if (!SUPPORTED_EXTS.includes(ext) || getMediaByFilename(file) || !fs.statSync(filePath).isFile()) continue;
-    const isVideo = VIDEO_EXTS.includes(ext);
-    const stat = fs.statSync(filePath);
-    let realExif: any = {};
-    if (!isVideo) {
-      realExif = (await exifr.parse(filePath, { tiff: true, xmp: true, icc: true, gps: true }).catch(() => null)) || {};
-    }
-    const dateInfo = extractRealDate(realExif, stat);
-    const id = `upload-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-    insertMedia(
-      {
-        id,
-        title: file,
-        filename: file,
-        path: filePath,
-        url: `/media/${file}`,
-        thumbnailUrl: `/media/${file}`,
-        type: isVideo ? 'video' : 'image',
-        date: dateInfo.date,
-        dateFormatted: dateInfo.dateFormatted,
-        exif: formatExifData(realExif, stat, ext, dateInfo.dateTaken) as any,
-        location:
-          realExif.latitude && realExif.longitude
-            ? { name: 'GPS Location', city: '', country: '', latitude: realExif.latitude, longitude: realExif.longitude }
-            : undefined,
-        tags: [],
-        detectedObjects: [],
-        originalSize: stat.size,
-      },
-      { source: 'upload', aiStatus: 'pending' }
-    );
-    added++;
-  }
-  if (added) console.log(`[DB] Registered ${added} files found in media_uploads`);
-}
+import { migrateLegacyJson } from './src/server/migrate.ts';
+import {
+  SUPPORTED_EXTS,
+  VIDEO_EXTS,
+  extractRealDate,
+  formatExifData,
+  ingestUpload,
+  probeVideo,
+  readImageExif,
+  syncUploadsFolder,
+} from './src/server/ingest.ts';
+import { processMedia } from './src/server/analyze.ts';
+import { PRIORITY, enqueue, getAiSettings, resetInterruptedJobs, startWorker, wakeWorker } from './src/server/queue.ts';
 
 /**
  * Keeps data out of the dev server: Vite serves any file under the project root
@@ -290,7 +91,10 @@ async function startServer() {
 
   openDatabase(DATA_DIR);
   migrateLegacyJson(DATA_DIR, mediaDir);
-  await syncUploadsFolder(mediaDir);
+  const registered = await syncUploadsFolder(mediaDir);
+  if (getAiSettings().autoTag) registered.forEach(id => enqueue(id, PRIORITY.backfill));
+  const resumed = resetInterruptedJobs();
+  if (resumed) console.log(`[QUEUE] Resuming ${resumed} job(s) interrupted by the last shutdown`);
 
   // ── Access control ────────────────────────────────────────────────────────
   // Public: the auth endpoints, a bare health check and the SPA shell (login screen).
@@ -368,6 +172,11 @@ async function startServer() {
     if (item?.originalHeicUrl) {
       const heicPath = path.join(mediaDir, 'heic_originals', path.basename(item.originalHeicUrl));
       if (isInside(heicPath, mediaDir) && fs.existsSync(heicPath)) fs.unlinkSync(heicPath);
+    }
+    // Video posters written by the AI worker
+    if (typeof item?.previewUrl === 'string' && item.previewUrl.startsWith('/media/previews/')) {
+      const posterPath = path.join(mediaDir, 'previews', path.basename(item.previewUrl));
+      if (isInside(posterPath, mediaDir) && fs.existsSync(posterPath)) fs.unlinkSync(posterPath);
     }
     return result;
   };
@@ -514,324 +323,37 @@ async function startServer() {
     res.json({ success: true, libraryPath: currentLibraryPath });
   });
 
-  app.post('/api/upload', upload.array('files'), (req, res) => {
-    if (!req.files || !Array.isArray(req.files)) {
-      return res.status(400).json({ success: false, error: 'No files uploaded' });
-    }
-    const filenames = req.files.map(f => f.filename);
-    res.json({ success: true, filenames });
-  });
+  // Fast upload: store, read metadata, convert HEIC, save as AI-pending and return.
+  // Tagging happens in the background queue.
+  app.post('/api/media/upload', upload.array('files'), async (req, res) => {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (files.length === 0) return res.status(400).json({ success: false, error: 'No files uploaded' });
 
+    // One lastModified per file, in upload order (a single field arrives as a string).
+    const clientDates = ([] as unknown[]).concat(req.body?.clientDates ?? []).map(v => Number(v));
+    const { autoTag } = getAiSettings();
+    const items = [];
+    const failed: string[] = [];
 
-  app.post('/api/analyze-media', upload.array('files'), async (req, res) => {
-    if (!req.files || !Array.isArray(req.files) || req.files.length === 0) {
-      return res.status(400).json({ success: false, error: 'No files uploaded' });
-    }
-
-    const processedItems = [];
-
-    for (const file of req.files) {
-      let filePath = file.path;
-      const tempFramePath = `${filePath}.jpg`;
-      let tempFrameCreated = false;
-
-      const originalExt = path.extname(file.originalname).toLowerCase();
-      const isVideo = file.mimetype?.startsWith('video') || ['.mp4', '.mov', '.webm', '.avi'].includes(originalExt);
-      let mimeType = file.mimetype || 'image/jpeg';
-
-      let realExif: any = {};
-      let videoMeta: any = undefined;
-      if (!isVideo) {
-        try {
-          realExif = await exifr.parse(filePath, { tiff: true, xmp: true, icc: true, gps: true }) || {};
-        } catch (e) {
-          console.warn(`EXIF parse error (${originalExt} may not support EXIF):`, (e as any)?.message);
-          realExif = {};
-        }
-      } else {
-        try {
-          const ffprobeRaw = execFileSync(ffprobeStatic.path, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath]).toString();
-          const ffprobeData = JSON.parse(ffprobeRaw);
-
-          const tags = { ...(ffprobeData?.streams?.[0]?.tags || {}), ...(ffprobeData?.format?.tags || {}) };
-          const creationTime = tags.creation_time;
-
-          let parsedLat = undefined;
-          let parsedLon = undefined;
-          const locationStr = tags['com.apple.quicktime.location.ISO6709'] || tags.location;
-
-          if (locationStr) {
-            const match = locationStr.match(/([+-]\d+\.\d+)([+-]\d+\.\d+)/);
-            if (match) {
-              parsedLat = parseFloat(match[1]);
-              parsedLon = parseFloat(match[2]);
-            }
-          }
-
-          if (creationTime || tags.make || tags.model || parsedLat !== undefined) {
-            realExif = {
-              DateTimeOriginal: creationTime,
-              Make: tags.make,
-              Model: tags.model,
-              latitude: parsedLat,
-              longitude: parsedLon
-            };
-          }
-
-          const durationSeconds = ffprobeData?.format?.duration ? parseFloat(ffprobeData.format.duration) : 0;
-          const mins = Math.floor(durationSeconds / 60);
-          const secs = Math.floor(durationSeconds % 60);
-          const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
-
-          let codecName = ffprobeData?.streams?.find((s: any) => s.codec_type === 'video')?.codec_name;
-          if (codecName === 'hevc') codecName = 'HEVC (H.265)';
-          else if (codecName === 'h264') codecName = 'H.264';
-          else if (codecName) codecName = codecName.toUpperCase();
-          else codecName = 'Unknown Video Codec';
-
-          const audioStream = ffprobeData?.streams?.find((s: any) => s.codec_type === 'audio');
-          let audioCodec = audioStream?.codec_name ? audioStream.codec_name.toUpperCase() : 'No Audio';
-          if (audioStream?.bit_rate) {
-            audioCodec += ` ${Math.round(parseInt(audioStream.bit_rate) / 1000)}kbps`;
-          }
-
-          const bitrate = ffprobeData?.format?.bit_rate ? `${(parseInt(ffprobeData.format.bit_rate) / 1000000).toFixed(1)} Mbps` : 'Unknown Mbps';
-          const videoStream = ffprobeData?.streams?.find((s: any) => s.codec_type === 'video');
-          let fpsStr: number | string = 30;
-          if (videoStream?.r_frame_rate) {
-            const [num, den] = videoStream.r_frame_rate.split('/');
-            if (den && num && parseInt(den) > 0) {
-              fpsStr = Math.round(parseInt(num) / parseInt(den));
-            }
-          }
-
-          videoMeta = {
-            duration: durationStr,
-            durationSeconds,
-            codec: codecName,
-            bitrate: bitrate,
-            frameRate: fpsStr,
-            audioCodec,
-            hwTranscode: 'NVENC Active'
-          };
-        } catch (err: any) {
-          console.warn('ffprobe metadata extraction failed:', err?.message);
-        }
-      }
-
-      // Deduplication check
-      const isDup = findDuplicate(file.originalname, file.size);
-      if (isDup) {
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        processedItems.push(isDup);
-        continue;
-      }
-
-      let realLocationName = "Unknown Location";
-      let locationObj: any = undefined;
-      let previewUrl: string | undefined = undefined;
-      let originalHeicUrl: string | undefined = undefined;
-      const aiProcessLogs: string[] = [];
-
-      if (!isVideo && realExif && realExif.latitude !== undefined && realExif.longitude !== undefined) {
-        try {
-          const geoRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${realExif.latitude}&lon=${realExif.longitude}`, {
-            headers: { 'User-Agent': 'MediaVault-App/1.0' }
-          });
-          if (geoRes.ok) {
-            const geoData: any = await geoRes.json();
-            realLocationName = geoData.address?.city || geoData.address?.town || geoData.address?.suburb || geoData.address?.county || geoData.address?.state || geoData.address?.country || "Known Location";
-          }
-        } catch (e) {
-          console.error("Geocoding failed", e);
-        }
-        locationObj = {
-          name: realLocationName,
-          city: '',
-          country: '',
-          latitude: realExif.latitude,
-          longitude: realExif.longitude
-        };
-      } else if (realLocationName && realLocationName !== "Unknown Location") {
-        locationObj = { name: realLocationName };
-      }
-
-      const stat = fs.existsSync(filePath) ? fs.statSync(filePath) : ({ size: file.size, birthtimeMs: Date.now(), mtimeMs: Date.now() } as any);
-      const clientDateMs = req.body.clientDates ? parseInt(req.body.clientDates, 10) : undefined;
-      const dateInfo = extractRealDate(realExif, stat, clientDateMs);
-      const isHeic = ['.heic', '.heif'].includes(originalExt);
-
-      if (isHeic) {
-        try {
-          const vaultDir = path.join(mediaDir, 'heic_originals');
-          if (!fs.existsSync(vaultDir)) fs.mkdirSync(vaultDir, { recursive: true });
-
-          const safeHeicPath = path.join(vaultDir, `${Date.now()}-${sanitizeUploadName(file.originalname)}`);
-          fs.copyFileSync(filePath, safeHeicPath);
-
-          const jpgBufferWithExif = await convertHeicToJpegWithExif(filePath, 0.88);
-          const newJpgPath = filePath.replace(/\.(heic|heif)$/i, '.jpg');
-          fs.writeFileSync(newJpgPath, jpgBufferWithExif);
-          fs.unlinkSync(filePath);
-
-          filePath = newJpgPath;
-          file.filename = file.filename.replace(/\.(heic|heif)$/i, '.jpg');
-          file.mimetype = 'image/jpeg';
-          mimeType = 'image/jpeg';
-
-          try {
-            const freshExif = await exifr.parse(filePath, { tiff: true, xmp: true, icc: true, gps: true });
-            if (freshExif) realExif = { ...realExif, ...freshExif };
-          } catch (e) { }
-
-          originalHeicUrl = `/media/heic_originals/${path.basename(safeHeicPath)}`;
-        } catch (heicErr: any) {
-          console.error('Fatal error converting HEIC:', heicErr);
+    for (const [index, file] of files.entries()) {
+      try {
+        const { item, duplicate } = await ingestUpload(file, { mediaDir, clientDateMs: clientDates[index] });
+        if (duplicate) {
+          items.push(item);
           continue;
         }
-      }
-
-      try {
-        let base64Data = '';
-        if (!isVideo) {
-          base64Data = fs.readFileSync(filePath).toString('base64');
-        } else {
-          try {
-            // execFile passes arguments without a shell, so filenames can't inject commands.
-            const execFileAsync = util.promisify(execFile);
-            try {
-              // Try extracting at 1 second
-              await execFileAsync(ffmpegPath as unknown as string, ['-y', '-ss', '00:00:01', '-i', filePath, '-vframes', '1', tempFramePath]);
-            } catch (err) {
-              // Fallback to 0 seconds if video is too short
-              await execFileAsync(ffmpegPath as unknown as string, ['-y', '-ss', '00:00:00', '-i', filePath, '-vframes', '1', tempFramePath]);
-            }
-            if (fs.existsSync(tempFramePath)) {
-              const stat = fs.statSync(tempFramePath);
-              console.log(`[FFmpeg] Frame extracted: ${tempFramePath} (${stat.size} bytes)`);
-              if (stat.size > 0) {
-                tempFrameCreated = true;
-                const buffer = await fs.promises.readFile(tempFramePath);
-                base64Data = buffer.toString('base64');
-                console.log(`[FFmpeg→AI] Buffer ready: ${buffer.length} bytes, base64 length: ${base64Data.length}`);
-                mimeType = 'image/jpeg';
-              } else {
-                console.warn('[FFmpeg] Frame file exists but is 0 bytes — FFmpeg may have failed silently.');
-              }
-            } else {
-              console.warn('[FFmpeg] Frame file does not exist after extraction:', tempFramePath);
-            }
-          } catch (ffmpegErr: any) {
-            console.error('[FFmpeg] Frame extraction failed:', ffmpegErr?.message);
-          }
-        }
-
-        let metadata: any = {
-          tags: ['uploaded'],
-          type: isVideo ? 'video' : 'image',
-          detectedObjects: [],
-          ocrText: '',
-          exif: { camera: '', lens: '', aperture: '', shutter: '', iso: 0 }
-        };
-
-        // Hybrid AI: Qwen3-VL on the self-managed llama.cpp runtime (vision + OCR)
-        const analysisImagePath = tempFrameCreated ? tempFramePath : filePath;
-        try {
-          if (isVideo && !base64Data) {
-            console.warn('[AI] Skipping vision analysis for video — no frame data available.');
-          } else {
-            console.log(`[AI] Sending to analyzeMediaHybrid: isVideo=${isVideo}, base64 length=${base64Data.length}, path=${analysisImagePath}`);
-            const hybridResult = await analyzeMediaHybrid(analysisImagePath, base64Data);
-            metadata.detectedObjects = hybridResult.detectedObjects;
-            metadata.tags = hybridResult.tags;
-            metadata.type = isVideo ? 'video' : hybridResult.type;
-            if (hybridResult.ocrText && hybridResult.ocrText.length > 0) {
-              metadata.ocrText = hybridResult.ocrText;
-              metadata.ocr = hybridResult.ocrText;
-              metadata.ocrData = {
-                documentType: 'Note',
-                extractedText: hybridResult.ocrText.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0)
-              };
-            }
-            aiProcessLogs.push(`[QWEN-VL] Vision engine detected ${hybridResult.detectedObjects.length} objects and extracted OCR text.`);
-          }
-        } catch (aiErr: any) {
-          console.warn('Hybrid AI analysis failed, using fallback metadata:', aiErr?.message);
-        }
-
-        if (tempFrameCreated && fs.existsSync(tempFramePath)) {
-          fs.promises.unlink(tempFramePath).catch(e => console.warn('Failed to cleanup temp frame:', e));
-        }
-
-        const forbiddenTags = ['binary', 'data', 'hexadecimal', 'text', 'code', 'smartphone', 'digital', 'format', 'noise', 'artifact', 'corruption', 'error', 'glitch'];
-        if (metadata.tags && Array.isArray(metadata.tags)) {
-          metadata.tags = metadata.tags.filter((tag: string) => !forbiddenTags.some(forbidden => tag.toLowerCase().includes(forbidden)));
-          if (metadata.tags.length === 0) metadata.tags = ['image', 'photo'];
-        }
-
-        const formattedExif = formatExifData(realExif, { size: file.size } as fs.Stats, isHeic ? 'HEIC' : (file.originalname.split('.').pop() || 'JPEG'), dateInfo.dateTaken, metadata.exif);
-        const orientation = realExif?.Orientation || 1;
-
-        const newItem = {
-          id: `upload-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-          filename: file.filename,
-          title: file.originalname,
-          path: filePath,
-          url: `/media/${file.filename}`,
-          thumbnailUrl: `/media/${file.filename}`,
-          previewUrl,
-          type: isVideo ? 'video' : (metadata.type || 'image'),
-          tags: metadata.tags || ['uploaded'],
-          detectedObjects: metadata.detectedObjects || [],
-          ocrText: metadata.ocrText,
-          ocr: metadata.ocrText,
-          ocrData: metadata.ocrData,
-          exifData: realExif,
-          exif: formattedExif,
-          location: locationObj,
-          originalHeicUrl,
-          originalSize: file.size,
-          date: dateInfo.date,
-          dateFormatted: dateInfo.dateFormatted,
-          orientation,
-          videoMeta
-        };
-
-        // Placeholder tags mean the AI call failed; keep the item pending so it can be analysed later.
-        processedItems.push(insertMedia(newItem as any, { source: 'upload', aiStatus: hasAiResults(newItem as any) ? 'done' : 'pending' }));
-
+        const saved = insertMedia(item, { source: 'upload', aiStatus: 'pending' });
+        if (autoTag) enqueue(saved.id, PRIORITY.upload);
+        items.push(getMedia(saved.id));
       } catch (err: any) {
-        console.warn('AI analysis fallback triggered:', err?.message || err);
-        const formattedExif = formatExifData(realExif, { size: file.size } as fs.Stats, isHeic ? 'HEIC' : (file.originalname.split('.').pop() || 'JPEG'), dateInfo.dateTaken);
-
-        const newItem = {
-          id: `upload-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-          filename: file.filename,
-          title: file.originalname,
-          path: filePath,
-          url: `/media/${file.filename}`,
-          thumbnailUrl: `/media/${file.filename}`,
-          previewUrl,
-          location: locationObj,
-          originalHeicUrl,
-          originalSize: file.size,
-          date: dateInfo.date,
-          dateFormatted: dateInfo.dateFormatted,
-          type: isVideo ? 'video' : 'image',
-          tags: ['image', 'photo'],
-          detectedObjects: [],
-          ocrText: '',
-          exifData: realExif,
-          exif: formattedExif,
-          orientation: realExif?.Orientation || 1,
-          videoMeta
-        };
-
-        processedItems.push(insertMedia(newItem as any, { source: 'upload', aiStatus: 'pending' }));
+        console.error(`[UPLOAD] Failed to ingest ${file.originalname}:`, err?.message || err);
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        failed.push(file.originalname);
       }
     }
 
-    res.json({ success: true, items: processedItems });
+    wakeWorker();
+    res.json({ success: true, items, failed });
   });
 
   app.post('/api/media/trash', (req, res) => {
@@ -966,6 +488,7 @@ async function startServer() {
         scanProgress.totalFiles = files.length;
 
         let indexedCount = 0;
+        const { autoTag } = getAiSettings();
 
         for (const file of files) {
           const srcPath = path.join(currentLibraryPath, file);
@@ -975,12 +498,7 @@ async function startServer() {
               const ext = path.extname(file).toLowerCase();
               if (SUPPORTED_EXTS.includes(ext)) {
                 const isVideo = VIDEO_EXTS.includes(ext);
-                let realExif: any = {};
-                if (!isVideo) {
-                  try {
-                    realExif = await exifr.parse(srcPath, { tiff: true, xmp: true, icc: true, gps: true }) || {};
-                  } catch (e) { }
-                }
+                const { realExif, videoMeta } = isVideo ? probeVideo(srcPath) : { realExif: await readImageExif(srcPath), videoMeta: undefined };
 
                 const dateInfo = extractRealDate(realExif, stat);
                 const formattedExif = formatExifData(realExif, stat, ext, dateInfo.dateTaken);
@@ -1022,10 +540,13 @@ async function startServer() {
                   tags: [],
                   detectedObjects: [],
                   originalSize: stat.size,
+                  videoMeta,
                   isFavorite: false
                 };
 
                 insertMedia(newItem as any, { source: 'scan', aiStatus: 'pending' });
+                // Scanned libraries can be large: they go after uploads in the queue.
+                if (autoTag) enqueue(id, PRIORITY.scan);
                 indexedCount++;
                 scanProgress.logMessages.push(`[INDEX] Indexed ${file}`);
               }
@@ -1077,11 +598,12 @@ async function startServer() {
     // Print localhost for loopback binds: Firebase sign-in is authorized for localhost, not 127.0.0.1.
     const shownHost = ['127.0.0.1', '::1'].includes(HOST) ? 'localhost' : HOST;
     console.log(`MediaVault server listening at http://${shownHost}:${PORT}`);
-    // Boot the local AI runtime in the background; uploads wait for it via analyzeMediaHybrid.
-    // AI_AUTOSTART=false defers it to the first upload.
+    // Boot the local AI runtime in the background; queued jobs wait for it.
+    // AI_AUTOSTART=false defers it to the first job.
     if (process.env.AI_AUTOSTART !== 'false') {
-      startAiRuntime().catch(() => { /* status already logged; retried on next upload */ });
+      startAiRuntime().catch(() => { /* status already logged; the queue retries later */ });
     }
+    startWorker({ process: item => processMedia(item, { mediaDir }) });
   });
 }
 

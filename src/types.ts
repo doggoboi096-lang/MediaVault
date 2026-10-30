@@ -92,6 +92,8 @@ export interface QueueProgress {
   pending: number;
   processing: number;
   failed: number;
+  /** Items still waiting for tags that have no job yet (auto-tag was off, or they failed). */
+  unqueued: number;
   /** Why the worker is idle while work is waiting, if it is. */
   blockedBy: 'paused' | 'on-battery' | 'ai-unavailable' | null;
 }

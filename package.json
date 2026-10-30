@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test:security": "tsx scripts/security-check.ts",
-    "db:migrate": "tsx scripts/migrate-db.ts"
+    "db:migrate": "tsx scripts/migrate-db.ts",
+    "test:queue": "tsx scripts/queue-check.ts"
   },
   "dependencies": {
     "@fontsource/be-vietnam-pro": "^5.3.0",

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Loader2, Languages } from 'lucide-react';
 import { auth, googleProvider } from '../lib/firebase';
 import { signInWithPopup, signOut } from 'firebase/auth';
-import { translations, Lang } from '../lib/i18n';
+import { translations, Lang, fill } from '../lib/i18n';
 import { BrandMark } from './Header';
 
 interface LoginScreenProps {
@@ -45,13 +45,26 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, lang, 
         onLoginSuccess(data.email);
         return;
       }
-      setErrorMsg(res.status === 403 ? t('loginForbidden') : res.status === 429 ? t('loginRateLimited') : t('loginFailed'));
+      setErrorMsg(
+        res.status === 403
+          ? t('loginForbidden')
+          : res.status === 429
+            ? t('loginRateLimited')
+            : res.status === 401
+              ? t('loginTokenRejected')
+              : t('loginFailed')
+      );
     } catch (error: any) {
       console.error('Sign-in error', error);
+      const code = error?.code;
       setErrorMsg(
-        error?.code === 'auth/popup-closed-by-user' || error?.code === 'auth/popup-blocked'
+        code === 'auth/popup-closed-by-user' || code === 'auth/popup-blocked' || code === 'auth/cancelled-popup-request'
           ? t('loginPopupClosed')
-          : t('loginFailed')
+          : code === 'auth/unauthorized-domain'
+            ? fill(t('loginUnauthorizedDomain'), { host: window.location.hostname })
+            : code === 'auth/network-request-failed'
+              ? t('loginNetwork')
+              : `${t('loginFailed')}${code ? ` (${code})` : ''}`
       );
     }
     setIsConnecting(false);

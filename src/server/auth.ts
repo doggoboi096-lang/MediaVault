@@ -142,7 +142,9 @@ export async function exchangeGoogleToken(idToken: string): Promise<{ email: str
   let decoded;
   try {
     decoded = await firebaseAuth().verifyIdToken(idToken);
-  } catch {
+  } catch (err: any) {
+    // Log why (wrong project id, expired token, no network to fetch Google's keys…) without the token itself.
+    console.warn(`[AUTH] Google ID token rejected: ${err?.code || 'error'}: ${String(err?.message || err).slice(0, 200)}`);
     throw new AuthError(401, 'invalid token');
   }
   const email = (decoded.email || '').toLowerCase();

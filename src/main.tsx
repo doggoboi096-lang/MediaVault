@@ -7,8 +7,16 @@ import '@fontsource/be-vietnam-pro/600.css';
 import App from './App.tsx';
 import './index.css';
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+// Firebase authorizes "localhost" but not the bare loopback IPs, so Google sign-in fails with
+// auth/unauthorized-domain on http://127.0.0.1. Send loopback-IP visits to localhost instead.
+if (['127.0.0.1', '[::1]'].includes(window.location.hostname)) {
+  const url = new URL(window.location.href);
+  url.hostname = 'localhost';
+  window.location.replace(url.toString());
+} else {
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}

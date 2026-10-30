@@ -1205,7 +1205,9 @@ async function startServer() {
   }
 
   app.listen(PORT, HOST, () => {
-    console.log(`MediaVault server listening at http://${HOST}:${PORT}`);
+    // Print localhost for loopback binds: Firebase sign-in is authorized for localhost, not 127.0.0.1.
+    const shownHost = ['127.0.0.1', '::1'].includes(HOST) ? 'localhost' : HOST;
+    console.log(`MediaVault server listening at http://${shownHost}:${PORT}`);
     // Boot the local AI runtime in the background; uploads wait for it via analyzeMediaHybrid.
     // AI_AUTOSTART=false defers it to the first upload.
     if (process.env.AI_AUTOSTART !== 'false') {

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, Folder, Check } from 'lucide-react';
-import { SystemHardwareStatus } from '../types';
+import { QueueProgress, SystemHardwareStatus } from '../types';
 import { translations, Lang, fill, formatBytes } from '../lib/i18n';
 import { PageHeader, PillButton, TextButton } from './ui';
 import { apiFetch } from '../lib/api';
@@ -15,6 +15,14 @@ interface SettingsViewProps {
   setLang: (l: Lang) => void;
   /** Row to open on arrival, e.g. 'hardware' from the sidebar's "Manage storage". */
   initialOpen?: RowId;
+  /** Live AI queue counters from /api/events. */
+  queue: QueueProgress | null;
+}
+
+interface AiQueueSettings {
+  autoTag: boolean;
+  onlyOnAc: boolean;
+  paused: boolean;
 }
 
 type RowId = 'language' | 'ai' | 'media' | 'network' | 'database' | 'hardware';
@@ -69,6 +77,39 @@ const Row: React.FC<{
   </section>
 );
 
+/** On/off setting with its own label and description. */
+const SwitchRow: React.FC<{ label: string; description: string; checked: boolean; disabled?: boolean; onChange: (v: boolean) => void }> = ({
+  label,
+  description,
+  checked,
+  disabled,
+  onChange,
+}) => (
+  <div className="flex items-center gap-4 py-3">
+    <div className="flex-1 min-w-0">
+      <p className="text-[15px] text-ink">{label}</p>
+      <p className="text-sm text-ink-muted mt-0.5">{description}</p>
+    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`relative w-[52px] h-8 rounded-full flex-shrink-0 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-wait ${
+        checked ? 'bg-accent' : 'bg-tile border-2 border-ink-faint'
+      }`}
+    >
+      <span
+        className={`absolute top-1/2 -translate-y-1/2 rounded-full transition-all ${
+          checked ? 'left-[24px] w-6 h-6 bg-on-accent' : 'left-[6px] w-4 h-4 bg-ink-muted'
+        }`}
+      />
+    </button>
+  </div>
+);
+
 const selectClass =
   'w-full h-11 rounded-lg bg-tile border border-line px-3 text-sm text-ink outline-none focus:border-accent cursor-pointer';
 
@@ -81,6 +122,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   lang,
   setLang,
   initialOpen,
+  queue,
 }) => {
   const t = (key: keyof typeof translations.en) => translations[lang][key] || key;
   const [libraryInput, setLibraryInput] = useState(currentLibraryPath);
@@ -110,6 +152,43 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       clearInterval(id);
     };
   }, []);
+
+  // Background tagging controls
+  const [aiSettings, setAiSettings] = useState<AiQueueSettings | null>(null);
+  const [onAcPower, setOnAcPower] = useState<boolean | null>(null);
+  const [savingSetting, setSavingSetting] = useState(false);
+  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiFetch('/api/settings/ai')
+      .then(r => r.json())
+      .then(d => {
+        if (!d.success) return;
+        setAiSettings(d.settings);
+        setOnAcPower(d.onAcPower);
+      })
+      .catch(() => {});
+  }, []);
+
+  const changeAiSetting = async (patch: Partial<AiQueueSettings>) => {
+    if (!aiSettings) return;
+    setAiSettings({ ...aiSettings, ...patch });
+    setSavingSetting(true);
+    try {
+      const d = await (await apiFetch('/api/settings/ai', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })).json();
+      if (d.success) {
+        setAiSettings(d.settings);
+        setOnAcPower(d.onAcPower);
+      }
+    } finally {
+      setSavingSetting(false);
+    }
+  };
+
+  const runBackfill = async () => {
+    const d = await (await apiFetch('/api/queue/backfill', { method: 'POST' })).json();
+    if (d.success) setBackfillMsg(fill(t('aiBackfillQueued'), { n: d.queued }));
+  };
 
   const toggle = (id: RowId) => setOpenRows(rows => (rows.includes(id) ? rows.filter(r => r !== id) : [...rows, id]));
 
@@ -200,6 +279,47 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </span>
           }
         >
+          {aiSettings && (
+            <div className="pb-3 mb-2 border-b border-line">
+              <SwitchRow
+                label={t('aiAutoTag')}
+                description={t('aiAutoTagDesc')}
+                checked={aiSettings.autoTag}
+                disabled={savingSetting}
+                onChange={v => changeAiSetting({ autoTag: v })}
+              />
+              <SwitchRow
+                label={t('aiOnlyOnAc')}
+                description={t('aiOnlyOnAcDesc')}
+                checked={aiSettings.onlyOnAc}
+                disabled={savingSetting}
+                onChange={v => changeAiSetting({ onlyOnAc: v })}
+              />
+              <SwitchRow
+                label={t('aiPause')}
+                description={t('aiPauseDesc')}
+                checked={aiSettings.paused}
+                disabled={savingSetting}
+                onChange={v => changeAiSetting({ paused: v })}
+              />
+            </div>
+          )}
+          {queue && (
+            <KV label={t('aiQueueLabel')}>
+              {fill(t('aiQueueValue'), { pending: queue.pending, processing: queue.processing, failed: queue.failed })}
+            </KV>
+          )}
+          {onAcPower !== null && <KV label={t('aiPowerLabel')}>{onAcPower ? t('powerAc') : t('powerBattery')}</KV>}
+          <div className="py-3 flex flex-wrap items-center gap-3">
+            <PillButton onClick={runBackfill}>
+              {queue?.unqueued ? fill(t('aiBackfill'), { n: queue.unqueued }) : t('aiBackfillNone')}
+            </PillButton>
+            {backfillMsg && (
+              <span className="text-sm text-ink-muted" role="status">
+                {backfillMsg}
+              </span>
+            )}
+          </div>
           <KV label={t('aiStatus')}>{ai?.message || aiLabel}</KV>
           <KV label={t('modelArch')}>Qwen3-VL 4B (llama.cpp)</KV>
           <KV label={t('ocrPipeline')}>Qwen3-VL Native OCR</KV>

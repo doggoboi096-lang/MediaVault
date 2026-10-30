@@ -32,7 +32,7 @@ import { ArchitectureModal } from './components/ArchitectureModal';
 import { CommandPalette } from './components/CommandPalette';
 import { LoginScreen } from './components/LoginScreen';
 import { SMART_COLLECTIONS, INDEXING_ACTIVITIES, DEFAULT_HARDWARE_STATUS } from './data/mockMedia';
-import { MediaItem, SmartCollection, IndexingActivity, SystemHardwareStatus, LibraryScanProgress } from './types';
+import { MediaItem, SmartCollection, IndexingActivity, SystemHardwareStatus, LibraryScanProgress, QueueProgress } from './types';
 
 export default function App() {
   // The server session (httpOnly cookie) is the source of truth; /api/auth/me tells us if it is valid.
@@ -46,7 +46,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isLoadingMedia, setIsLoadingMedia] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [settingsFocus, setSettingsFocus] = useState<'hardware' | undefined>(undefined);
+  const [settingsFocus, setSettingsFocus] = useState<'hardware' | 'ai' | undefined>(undefined);
+  const [queue, setQueue] = useState<QueueProgress | null>(null);
 
   // Modals state
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
@@ -163,6 +164,19 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // Live updates from the background AI queue (Server-Sent Events)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const source = new EventSource('/api/events', { withCredentials: true });
+    source.addEventListener('media.updated', e => {
+      const item: MediaItem = JSON.parse((e as MessageEvent).data);
+      setMediaList(prev => (prev.some(m => m.id === item.id) ? prev.map(m => (m.id === item.id ? item : m)) : [item, ...prev]));
+      setSelectedMedia(prev => (prev && prev.id === item.id ? item : prev));
+    });
+    source.addEventListener('queue.progress', e => setQueue(JSON.parse((e as MessageEvent).data)));
+    return () => source.close();
+  }, [isAuthenticated]);
+
   // ── Derived media sets ────────────────────────────────────────────────────
   const libraryMedia = mediaList.filter(m => !m.isDeleted);
   const trashMedia = mediaList.filter(m => m.isDeleted);
@@ -218,9 +232,23 @@ export default function App() {
     if (next !== 'settings') setSettingsFocus(undefined);
   };
 
-  const openSettings = (focus?: 'hardware') => {
+  const openSettings = (focus?: 'hardware' | 'ai') => {
     goTo('settings');
     setSettingsFocus(focus);
+  };
+
+  // Queue a photo for another AI pass; the result arrives over /api/events.
+  const handleReanalyze = async (id: string) => {
+    try {
+      const res = await apiFetch(`/api/media/${encodeURIComponent(id)}/reanalyze`, { method: 'POST' });
+      const data = await res.json();
+      if (data.item) {
+        setMediaList(prev => prev.map(m => (m.id === id ? data.item : m)));
+        setSelectedMedia(prev => (prev && prev.id === id ? data.item : prev));
+      }
+    } catch (e) {
+      console.error('Failed to queue re-analysis', e);
+    }
   };
 
   // ── Media actions ─────────────────────────────────────────────────────────
@@ -569,6 +597,7 @@ export default function App() {
             lang={lang}
             setLang={setLang}
             initialOpen={settingsFocus}
+            queue={queue}
           />
         );
     }
@@ -591,6 +620,7 @@ export default function App() {
           onRestore={(id, filename) => handleRestoreMedia([filename])}
           onPermanentDelete={(id, filename) => handlePermanentlyDeleteMedia([filename])}
           onUpdateMedia={handleUpdateMedia}
+          onReanalyze={handleReanalyze}
           currentView={view}
           lang={lang}
         />
@@ -606,6 +636,8 @@ export default function App() {
             onToggleSidebar={() => setSidebarOpen(v => !v)}
             onLogout={handleLogout}
             userEmail={userEmail}
+            queue={queue}
+            onOpenAiSettings={() => openSettings('ai')}
             lang={lang}
             setLang={setLang}
           />

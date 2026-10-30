@@ -232,6 +232,19 @@ async function main() {
     });
     const indexed = ((await (await fetch(`${BASE}/api/media`, authed)).json()).data as any[]).find(i => i.filename === 'sample.png');
     record('F', 'PATCH không sửa được path/url', patch.status === 200 && indexed?.path === path.join(dataDir, 'media_uploads', 'sample.png') && indexed?.url === '/media/sample.png', `path ${indexed?.path?.endsWith('sample.png') ? 'giữ nguyên' : 'BỊ ĐỔI'}, url ${indexed?.url}`);
+
+    // Phase-2 endpoints are behind the same session check
+    const phase2 = await Promise.all(
+      [
+        ['GET', '/api/events'],
+        ['GET', '/api/settings/ai'],
+        ['PATCH', '/api/settings/ai'],
+        ['POST', '/api/queue/backfill'],
+        [`POST`, `/api/media/${indexed?.id || 'x'}/reanalyze`],
+        ['GET', '/api/media/search?q=test'],
+      ].map(async ([method, p]) => [p, (await fetch(`${BASE}${p}`, { method })).status])
+    );
+    record('G', 'Endpoint giai đoạn 2 cần session', phase2.every(([, s]) => s === 401), phase2.map(([p, s]) => `${String(p).replace(/media\/[^/]+\/re/, 'media/:id/re')} ${s}`).join('; '));
   } finally {
     server.child.kill();
   }

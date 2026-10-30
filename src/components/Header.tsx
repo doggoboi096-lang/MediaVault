@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Search, Plus, HelpCircle, Settings, Menu, X, Languages, LogOut } from 'lucide-react';
-import { translations, Lang } from '../lib/i18n';
+import { Search, Plus, HelpCircle, Settings, Menu, X, Languages, LogOut, Sparkles, Loader2 } from 'lucide-react';
+import { translations, Lang, fill } from '../lib/i18n';
+import { QueueProgress } from '../types';
 import { IconButton } from './ui';
 
 interface HeaderProps {
@@ -14,6 +15,9 @@ interface HeaderProps {
   onLogout: () => void;
   /** Owner email from the server session. */
   userEmail: string;
+  /** Live AI queue counters; the chip shows while photos are waiting. */
+  queue: QueueProgress | null;
+  onOpenAiSettings: () => void;
   lang: Lang;
   setLang: (l: Lang) => void;
 }
@@ -37,6 +41,8 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleSidebar,
   onLogout,
   userEmail,
+  queue,
+  onOpenAiSettings,
   lang,
   setLang,
 }) => {
@@ -100,6 +106,33 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Actions */}
       <div className="flex items-center gap-0.5 ml-auto pl-2">
+        {queue && queue.pending + queue.processing > 0 && (
+          <button
+            type="button"
+            id="ai-queue-chip"
+            onClick={onOpenAiSettings}
+            aria-live="polite"
+            className="h-9 px-3 mr-1 rounded-full bg-tile hover:bg-tile-hover hidden md:flex items-center gap-2 text-[13px] text-ink-muted hover:text-ink transition-colors cursor-pointer"
+          >
+            {queue.processing > 0 && !queue.blockedBy ? (
+              <Loader2 className="w-4 h-4 text-accent animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4 text-accent" />
+            )}
+            {fill(
+              t(
+                queue.blockedBy === 'paused'
+                  ? 'aiChipPaused'
+                  : queue.blockedBy === 'on-battery'
+                    ? 'aiChipOnBattery'
+                    : queue.blockedBy === 'ai-unavailable'
+                      ? 'aiChipUnavailable'
+                      : 'aiChipRemaining'
+              ),
+              { n: queue.pending + queue.processing }
+            )}
+          </button>
+        )}
         <IconButton label={t('uploadMedia')} onClick={onOpenUpload}>
           <Plus className="w-6 h-6" />
         </IconButton>

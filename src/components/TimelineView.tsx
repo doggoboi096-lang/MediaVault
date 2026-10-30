@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Star, Check, X, Download, Share2, CalendarDays, Trash2, RotateCcw, FileText } from 'lucide-react';
+import { Play, Star, Check, X, Download, Share2, CalendarDays, Trash2, RotateCcw, FileText, Loader2 } from 'lucide-react';
 import { MediaItem } from '../types';
 import { SmartMedia } from './SmartMedia';
 import { Chip, IconButton } from './ui';
@@ -89,10 +89,16 @@ const LazyTile: React.FC<{
         <Check className="w-4 h-4" strokeWidth={3} />
       </button>
 
-      {item.type === 'video' && (
+      {(item.type === 'video' || item.aiStatus === 'processing') && (
         <div className="absolute top-2 right-2 flex items-center gap-1 text-white text-xs font-medium drop-shadow pointer-events-none">
-          {item.videoMeta?.duration && <span>{item.videoMeta.duration}</span>}
-          <Play className="w-4 h-4 fill-current" />
+          {/* The background AI is tagging this item right now */}
+          {item.aiStatus === 'processing' && <Loader2 className="w-4 h-4 animate-spin" aria-label="AI" />}
+          {item.type === 'video' && (
+            <>
+              {item.videoMeta?.duration && <span>{item.videoMeta.duration}</span>}
+              <Play className="w-4 h-4 fill-current" />
+            </>
+          )}
         </div>
       )}
 

@@ -37,7 +37,19 @@ import {
   syncUploadsFolder,
 } from './src/server/ingest.ts';
 import { processMedia } from './src/server/analyze.ts';
-import { PRIORITY, enqueue, getAiSettings, resetInterruptedJobs, startWorker, wakeWorker } from './src/server/queue.ts';
+import {
+  PRIORITY,
+  enqueue,
+  enqueueBackfill,
+  getAiSettings,
+  queueProgress,
+  resetInterruptedJobs,
+  startWorker,
+  updateAiSettings,
+  wakeWorker,
+} from './src/server/queue.ts';
+import { broadcast, broadcastIfChanged, eventsHandler } from './src/server/events.ts';
+import { isOnAcPower } from './src/server/power.ts';
 
 /**
  * Keeps data out of the dev server: Vite serves any file under the project root
@@ -344,7 +356,10 @@ async function startServer() {
         }
         const saved = insertMedia(item, { source: 'upload', aiStatus: 'pending' });
         if (autoTag) enqueue(saved.id, PRIORITY.upload);
-        items.push(getMedia(saved.id));
+        const fresh = getMedia(saved.id);
+        items.push(fresh);
+        // Other open tabs and devices add it to their timeline too.
+        broadcast('media.updated', fresh);
       } catch (err: any) {
         console.error(`[UPLOAD] Failed to ingest ${file.originalname}:`, err?.message || err);
         if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
@@ -354,6 +369,49 @@ async function startServer() {
 
     wakeWorker();
     res.json({ success: true, items, failed });
+  });
+
+  // ── Live updates & AI queue controls ──────────────────────────────────────
+  const progressWithPower = async () => ({ ...queueProgress(), settings: getAiSettings(), onAcPower: await isOnAcPower() });
+
+  app.get('/api/events', eventsHandler(() => [{ event: 'queue.progress', data: queueProgress() }]));
+
+  app.get('/api/settings/ai', async (req, res) => {
+    res.json({ success: true, ...(await progressWithPower()) });
+  });
+
+  app.patch('/api/settings/ai', async (req, res) => {
+    const patch: Record<string, boolean> = {};
+    for (const key of ['autoTag', 'onlyOnAc', 'paused'] as const) {
+      const value = req.body?.[key];
+      if (value === undefined) continue;
+      if (typeof value !== 'boolean') return res.status(400).json({ success: false, error: `${key} must be true or false` });
+      patch[key] = value;
+    }
+    updateAiSettings(patch);
+    audit(req.user!.email, 'ai-settings', [], JSON.stringify(patch));
+    broadcastIfChanged('queue.progress', queueProgress());
+    res.json({ success: true, ...(await progressWithPower()) });
+  });
+
+  // Queue every item that still has no tags (auto-tag was off, or the AI failed).
+  app.post('/api/queue/backfill', (req, res) => {
+    const queued = enqueueBackfill();
+    broadcastIfChanged('queue.progress', queueProgress());
+    res.json({ success: true, queued });
+  });
+
+  app.post('/api/media/:id/reanalyze', (req, res) => {
+    const item = getMedia(req.params.id);
+    if (!item) return res.status(404).json({ success: false, error: 'Not found' });
+    if (item.isDeleted) return res.status(400).json({ success: false, error: 'item is in the trash' });
+    if (!enqueue(item.id, PRIORITY.reanalyze)) {
+      return res.status(409).json({ success: false, error: 'already being analysed' });
+    }
+    const fresh = getMedia(item.id);
+    broadcast('media.updated', fresh);
+    broadcastIfChanged('queue.progress', queueProgress());
+    res.json({ success: true, item: fresh });
   });
 
   app.post('/api/media/trash', (req, res) => {
@@ -603,7 +661,12 @@ async function startServer() {
     if (process.env.AI_AUTOSTART !== 'false') {
       startAiRuntime().catch(() => { /* status already logged; the queue retries later */ });
     }
-    startWorker({ process: item => processMedia(item, { mediaDir }) });
+    startWorker({
+      process: item => processMedia(item, { mediaDir }),
+      isOnAcPower,
+      onItemChanged: item => broadcast('media.updated', item),
+      onProgress: progress => broadcastIfChanged('queue.progress', progress),
+    });
   });
 }
 

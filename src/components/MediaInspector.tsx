@@ -23,7 +23,9 @@ import {
   RotateCcw,
   AlertTriangle,
   Edit2,
-  Save
+  Save,
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import { MediaItem } from '../types';
 import { SmartMedia } from './SmartMedia';
@@ -41,6 +43,8 @@ interface MediaInspectorProps {
   onRestore?: (id: string, filename: string) => void;
   onPermanentDelete?: (id: string, filename: string) => void;
   onUpdateMedia?: (item: MediaItem) => void;
+  /** Queues this photo for another AI pass. */
+  onReanalyze?: (id: string) => void;
   lang: Lang;
   currentView?: string;
 }
@@ -56,6 +60,7 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
   onRestore,
   onPermanentDelete,
   onUpdateMedia,
+  onReanalyze,
   lang,
   currentView
 }) => {
@@ -582,6 +587,30 @@ export const MediaInspector: React.FC<MediaInspectorProps> = ({
                 rows={3}
               />
             </div>
+
+            {/* Background AI state + re-analyse */}
+            {onReanalyze && localItem?.id && !isTrashMode && (
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-zinc-800 text-[11px]">
+                <span className="flex items-center gap-1.5 text-zinc-400 min-w-0" title={localItem.aiError || undefined}>
+                  {localItem.aiStatus === 'processing' ? (
+                    <><Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin flex-shrink-0" />{t('aiItemProcessing')}</>
+                  ) : localItem.aiStatus === 'pending' ? (
+                    <><Sparkles className="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" />{t('aiItemPending')}</>
+                  ) : localItem.aiStatus === 'failed' ? (
+                    <><AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" /><span className="truncate">{t('aiItemFailed')}</span></>
+                  ) : null}
+                </span>
+                <button
+                  id="btn-reanalyze"
+                  onClick={() => onReanalyze(localItem.id)}
+                  disabled={localItem.aiStatus === 'processing' || localItem.aiStatus === 'pending'}
+                  className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                  {t('reanalyze')}
+                </button>
+              </div>
+            )}
 
             {/* AI Vision Insights / Object Recognition Breakdown */}
             {detectedObjects.length > 0 && (

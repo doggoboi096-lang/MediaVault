@@ -177,6 +177,90 @@ async function main() {
       resumed && ids.length === 10 && twice === 0 && missing === 0 && /Resuming \d+ job/.test(serverLog),
       `${doneBeforeKill}/10 xong trước khi tắt; sau khi bật lại: ${ids.length - missing}/10 xong, ${twice} ảnh bị xử lý 2 lần`
     );
+
+    // Live events: listen to /api/events for the rest of the run
+    stubDelayMs = 40;
+    const events: { event: string; data: any }[] = [];
+    const sse = new AbortController();
+    const sseRes = await api('/api/events', { signal: sse.signal });
+    (async () => {
+      const reader = sseRes.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const chunk = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const event = /^event: (.*)$/m.exec(chunk)?.[1];
+          const data = /^data: (.*)$/m.exec(chunk)?.[1];
+          if (event && data) events.push({ event, data: JSON.parse(data) });
+        }
+      }
+    })().catch(() => {});
+
+    const setAi = (patch: object) =>
+      api('/api/settings/ai', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+
+    // 3. Auto-tag off → uploads stay pending; back on + backfill → tagged
+    await setAi({ autoTag: false });
+    const offNames = ['autotag-off-1.png', 'autotag-off-2.png', 'autotag-off-3.png'];
+    await upload(offNames);
+    await sleep(1500);
+    const stillPending = (await media()).filter(i => offNames.includes(i.title) && i.aiStatus === 'pending').length;
+    await setAi({ autoTag: true });
+    const backfill = await (await api('/api/queue/backfill', { method: 'POST' })).json();
+    const backfilled = await waitFor(async () => (await media()).filter(i => offNames.includes(i.title)).every(i => i.aiStatus === 'done'), 30_000);
+    record(
+      '3',
+      'Tắt tự gắn thẻ: ảnh ở pending; bật lại + Xử lý bù: được gắn tag',
+      stillPending === 3 && backfill.queued === 3 && backfilled,
+      `sau 1,5 s vẫn pending: ${stillPending}/3; xử lý bù đưa ${backfill.queued} ảnh vào hàng đợi; ${backfilled ? 'đã gắn tag hết' : 'CHƯA xong'}`
+    );
+
+    // 4. Pause holds the queue; resume continues it
+    await setAi({ paused: true });
+    await upload(['paused-1.png']);
+    await sleep(1500);
+    const heldWhilePaused = (await media()).find(i => i.title === 'paused-1.png')?.aiStatus;
+    const pausedEvent = events.some(e => e.event === 'queue.progress' && e.data.blockedBy === 'paused');
+    await setAi({ paused: false });
+    const resumedAfterPause = await waitFor(async () => (await media()).find(i => i.title === 'paused-1.png')?.aiStatus === 'done', 15_000);
+    record(
+      '4',
+      'Tạm dừng hàng đợi giữ ảnh lại, bỏ tạm dừng thì chạy tiếp',
+      heldWhilePaused === 'pending' && pausedEvent && resumedAfterPause,
+      `khi tạm dừng: ${heldWhilePaused}, sự kiện blockedBy=paused: ${pausedEvent ? 'có' : 'không'}; sau khi bỏ: ${resumedAfterPause ? 'done' : 'chưa xong'}`
+    );
+
+    // 5. SSE delivered item updates and queue progress
+    const pausedId = (await media()).find(i => i.title === 'paused-1.png')?.id;
+    const itemEvents = events.filter(e => e.event === 'media.updated' && e.data.id === pausedId).map(e => e.data.aiStatus);
+    const progressEvents = events.filter(e => e.event === 'queue.progress').length;
+    record(
+      '5',
+      'SSE /api/events gửi media.updated và queue.progress',
+      itemEvents.includes('processing') && itemEvents.at(-1) === 'done' && progressEvents > 0,
+      `paused-1.png qua SSE: ${itemEvents.join(' → ')}; ${progressEvents} sự kiện queue.progress`
+    );
+
+    // 6. Re-analyse an already tagged photo
+    const target = (await media()).find(i => i.title === 'batch-00.png');
+    const before = completions().get(target.id) || 0;
+    const re = await api(`/api/media/${target.id}/reanalyze`, { method: 'POST' });
+    const reBody = await re.json();
+    const redone = await waitFor(async () => (completions().get(target.id) || 0) === before + 1 && (await media()).find(i => i.id === target.id)?.aiStatus === 'done', 15_000);
+    record(
+      '6',
+      'Phân tích lại một ảnh đã có tag',
+      re.status === 200 && reBody.item?.aiStatus === 'pending' && redone,
+      `POST reanalyze ${re.status} (${reBody.item?.aiStatus}), ${redone ? 'chạy lại xong' : 'CHƯA chạy lại'}`
+    );
+
+    sse.abort();
   } finally {
     await stopServer(server);
   }

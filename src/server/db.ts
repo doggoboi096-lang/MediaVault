@@ -71,6 +71,14 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  // v2: full-text search over what the AI and EXIF said about each item.
+  // remove_diacritics 2 lets "ho chi minh" match "Hồ Chí Minh"; đ/Đ are folded to d before indexing.
+  `
+  CREATE VIRTUAL TABLE media_fts USING fts5(
+    media_id UNINDEXED, title, tags, objects, ocr, place, camera, description,
+    tokenize = 'unicode61 remove_diacritics 2'
+  );
+  `,
 ];
 
 export function openDatabase(dataDir: string): Database.Database {
@@ -89,6 +97,10 @@ export function openDatabase(dataDir: string): Database.Database {
       getDb().pragma(`user_version = ${v + 1}`);
     })();
   }
+
+  // Fill the search index for rows that predate it (first start after upgrading).
+  const indexed = (db.prepare('SELECT COUNT(*) AS n FROM media_fts').get() as { n: number }).n;
+  if (indexed !== countMedia()) rebuildSearchIndex();
   return db;
 }
 
@@ -172,6 +184,11 @@ export function findDuplicate(title: string, size: number): MediaItem | null {
 }
 
 export function insertMedia(item: MediaItem, opts: { source: MediaSource; aiStatus: AiStatus }): MediaItem {
+  getDb().transaction(() => insertRow(item, opts))();
+  return getMedia(item.id)!;
+}
+
+function insertRow(item: MediaItem, opts: { source: MediaSource; aiStatus: AiStatus }) {
   const now = Date.now();
   getDb()
     .prepare(
@@ -193,15 +210,18 @@ export function insertMedia(item: MediaItem, opts: { source: MediaSource; aiStat
       data: toDoc(item),
       now,
     });
-  onMediaChanged(item.id);
-  return getMedia(item.id)!;
+  indexForSearch(item.id);
 }
 
 /** Merges `patch` into a stored item. Column fields in the patch update their columns. */
 export function updateMedia(id: string, patch: Partial<MediaItem>): MediaItem | null {
   const current = getMedia(id);
   if (!current) return null;
-  const next = { ...current, ...patch };
+  getDb().transaction(() => updateRow(id, { ...current, ...patch }))();
+  return getMedia(id);
+}
+
+function updateRow(id: string, next: MediaItem) {
   getDb()
     .prepare(
       `UPDATE media SET title = @title, type = @type, date = @date, is_favorite = @is_favorite,
@@ -218,8 +238,7 @@ export function updateMedia(id: string, patch: Partial<MediaItem>): MediaItem | 
       data: toDoc(next),
       now: Date.now(),
     });
-  onMediaChanged(id);
-  return getMedia(id);
+  indexForSearch(id);
 }
 
 export function setDeleted(filenames: string[], deleted: boolean) {
@@ -242,7 +261,7 @@ export function removeMedia(filenames: string[]): MediaItem[] {
       const item = getMediaByFilename(f);
       if (!item) continue;
       del.run(f);
-      onMediaRemoved(item.id);
+      getDb().prepare('DELETE FROM media_fts WHERE media_id = ?').run(item.id);
       removed.push(item);
     }
   })();
@@ -253,12 +272,61 @@ export function countMedia(): number {
   return (getDb().prepare('SELECT COUNT(*) AS n FROM media').get() as { n: number }).n;
 }
 
-// Hooks for derived indexes (full-text search) kept in sync with media rows.
-let onMediaChanged: (id: string) => void = () => {};
-let onMediaRemoved: (id: string) => void = () => {};
-export function setMediaHooks(hooks: { changed: (id: string) => void; removed: (id: string) => void }) {
-  onMediaChanged = hooks.changed;
-  onMediaRemoved = hooks.removed;
+// ── Full-text search ────────────────────────────────────────────────────────
+/** The tokenizer strips accents but treats đ as its own letter; fold it so "dong" finds "Đồng". */
+const foldVietnamese = (s: string) => s.replace(/[đĐ]/g, 'd');
+
+/** Rewrites one item's row in media_fts. Called inside the same transaction as the media write. */
+function indexForSearch(id: string) {
+  const item = getMedia(id);
+  getDb().prepare('DELETE FROM media_fts WHERE media_id = ?').run(id);
+  if (!item) return;
+  const text = (parts: unknown[]) => foldVietnamese(parts.filter(p => typeof p === 'string' && p).join(' '));
+  getDb()
+    .prepare('INSERT INTO media_fts (media_id, title, tags, objects, ocr, place, camera, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(
+      id,
+      text([item.title, item.filename]),
+      text(item.tags || []),
+      text((item.detectedObjects || []).map(o => o?.label)),
+      text([item.ocrText || item.ocr || '']),
+      text([item.location?.name, item.location?.city, item.location?.country]),
+      text([item.exif?.camera, item.exif?.lens]),
+      text([item.description])
+    );
+}
+
+export function rebuildSearchIndex() {
+  const ids = (getDb().prepare('SELECT id FROM media').all() as { id: string }[]).map(r => r.id);
+  getDb().transaction(() => {
+    getDb().prepare('DELETE FROM media_fts').run();
+    ids.forEach(indexForSearch);
+  })();
+  console.log(`[DB] Search index rebuilt for ${ids.length} items`);
+}
+
+/**
+ * Ranked search over title, tags, detected objects, OCR text, place, camera and description.
+ * Every word must match (as a prefix), accents optional. Trashed items are excluded.
+ */
+export function searchMedia(query: string, limit = 500): MediaItem[] {
+  const words = foldVietnamese(query.normalize('NFC'))
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .slice(0, 12);
+  if (!words.length) return [];
+  const match = words.map(w => `"${w.replace(/"/g, '""')}"*`).join(' AND ');
+  const rows = getDb()
+    .prepare(
+      `SELECT m.* FROM media_fts f JOIN media m ON m.id = f.media_id
+       WHERE media_fts MATCH ? AND m.is_deleted = 0
+       -- weights: media_id, title, tags, objects, ocr, place, camera, description
+       ORDER BY bm25(media_fts, 0, 3, 5, 4, 2, 4, 1, 2)
+       LIMIT ?`
+    )
+    .all(match, limit) as MediaRow[];
+  return rows.map(toItem);
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────

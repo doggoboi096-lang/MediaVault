@@ -48,6 +48,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsFocus, setSettingsFocus] = useState<'hardware' | 'ai' | undefined>(undefined);
   const [queue, setQueue] = useState<QueueProgress | null>(null);
+  const [searchIds, setSearchIds] = useState<string[]>([]);
 
   // Modals state
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
@@ -164,6 +165,29 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // Full-text search on the server (FTS5), debounced while typing
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!isAuthenticated || !q) {
+      setSearchIds([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiFetch(`/api/media/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        if (!cancelled && data.success) setSearchIds(data.data.map((m: MediaItem) => m.id));
+      } catch (e) {
+        console.error('Search failed', e);
+      }
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery, isAuthenticated]);
+
   // Live updates from the background AI queue (Server-Sent Events)
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -182,19 +206,9 @@ export default function App() {
   const trashMedia = mediaList.filter(m => m.isDeleted);
 
   const query = searchQuery.trim().toLowerCase();
+  // Ranked ids from the server's full-text index; items come from mediaList so live tag updates show.
   const searchResults = query
-    ? libraryMedia.filter((item) =>
-        item.title.toLowerCase().includes(query) ||
-        item.filename.toLowerCase().includes(query) ||
-        item.tags.some((tag) => tag.toLowerCase().includes(query)) ||
-        item.location?.name?.toLowerCase().includes(query) ||
-        item.location?.city?.toLowerCase().includes(query) ||
-        item.location?.country?.toLowerCase().includes(query) ||
-        item.exif?.camera?.toLowerCase().includes(query) ||
-        item.detectedObjects?.some((obj) => obj.label.toLowerCase().includes(query)) ||
-        item.ocrData?.extractedText?.some((text) => text.toLowerCase().includes(query)) ||
-        item.ocrText?.toLowerCase().includes(query)
-      )
+    ? searchIds.map(id => libraryMedia.find(m => m.id === id)).filter((m): m is MediaItem => !!m)
     : [];
 
   const allCollections: Collection[] = [

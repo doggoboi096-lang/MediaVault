@@ -21,6 +21,7 @@ import {
   listMedia,
   openDatabase,
   removeMedia,
+  searchMedia,
   setDeleted,
   trashedFilenames,
   updateMedia,
@@ -303,6 +304,15 @@ async function startServer() {
       return res.status(404).json({ success: false, error: 'Not found' });
     }
     res.sendFile(filePath, { dotfiles: 'deny' });
+  });
+
+  // Full-text search (FTS5) over tags, detected objects, OCR text, place, camera and description.
+  app.get('/api/media/search', (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 200) : '';
+    const started = process.hrtime.bigint();
+    const items = searchMedia(q);
+    const tookMs = Number(process.hrtime.bigint() - started) / 1e6;
+    res.json({ success: true, data: items, tookMs: Math.round(tookMs * 100) / 100 });
   });
 
   app.get('/api/media', (req, res) => {

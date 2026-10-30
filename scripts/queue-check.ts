@@ -34,6 +34,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 // ── Stub AI (llama-server compatible subset) ───────────────────────────────
 let stubDelayMs = 50;
 let stubCalls = 0;
+let stubOcr = 'Không có văn bản.'; // the OCR step treats this phrase as "no text"
 const stub = http.createServer((req, res) => {
   if (req.url === '/health') return res.end(JSON.stringify({ status: 'ok' }));
   let body = '';
@@ -44,7 +45,7 @@ const stub = http.createServer((req, res) => {
     const json = JSON.parse(body || '{}').response_format?.type === 'json_object';
     const content = json
       ? JSON.stringify({ tags: ['stub scene', 'queue test'], detectedObjects: [{ label: 'cat', confidence: 0.91 }] })
-      : 'Không có văn bản.';
+      : stubOcr;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }));
   });
@@ -260,10 +261,71 @@ async function main() {
       `POST reanalyze ${re.status} (${reBody.item?.aiStatus}), ${redone ? 'chạy lại xong' : 'CHƯA chạy lại'}`
     );
 
+    // 7. Search finds a word from the OCR text, without accents, over HTTP
+    stubOcr = 'HÓA ĐƠN TIỀN ĐIỆN\nKhách hàng: Nguyễn Văn A\nĐịa chỉ: Biên Hòa, Đồng Nai';
+    await upload(['ocr-receipt.png']);
+    const ocrDone = await waitFor(async () => (await media()).find(i => i.title === 'ocr-receipt.png')?.aiStatus === 'done', 15_000);
+    stubOcr = 'Không có văn bản.';
+    const started = Date.now();
+    const found = await (await api(`/api/media/search?q=${encodeURIComponent('dong nai')}`)).json();
+    const roundTrip = Date.now() - started;
+    const hit = found.data?.some((i: any) => i.title === 'ocr-receipt.png');
+    const exact = (await (await api(`/api/media/search?q=${encodeURIComponent('Biên Hòa')}`)).json()).data?.some((i: any) => i.title === 'ocr-receipt.png');
+    record(
+      '7',
+      'Tìm chữ trong OCR (gõ không dấu) qua /api/media/search',
+      ocrDone && hit && exact && found.tookMs < 100,
+      `"dong nai" → ${hit ? 'tìm thấy' : 'KHÔNG thấy'} (truy vấn ${found.tookMs} ms, cả request ${roundTrip} ms); "Biên Hòa" → ${exact ? 'tìm thấy' : 'KHÔNG thấy'}`
+    );
+
     sse.abort();
   } finally {
     await stopServer(server);
   }
+
+  // 8. Search speed on a 5,000-item library (in-process, separate temp database)
+  const perfDir = path.join(tmp, 'perf');
+  const db = await import('../src/server/db.ts');
+  db.openDatabase(perfDir);
+  const words = ['bãi biển', 'núi', 'thành phố', 'cà phê', 'gia đình', 'sinh nhật', 'xe máy', 'hóa đơn', 'hợp đồng', 'hộ chiếu'];
+  db.getDb().transaction(() => {
+    for (let i = 0; i < 5000; i++) {
+      db.insertMedia(
+        {
+          id: `perf-${i}`,
+          filename: `perf-${i}.jpg`,
+          title: `IMG_${i}.jpg`,
+          path: path.join(perfDir, `perf-${i}.jpg`),
+          url: '',
+          thumbnailUrl: '',
+          type: 'image',
+          date: '2026-01-01',
+          dateFormatted: '',
+          exif: {} as any,
+          tags: [words[i % words.length], words[(i * 7) % words.length]],
+          detectedObjects: [],
+          ocrText: i === 4321 ? 'Phiếu bảo hành máy lọc nước Kangaroo số 0098' : `${words[(i * 3) % words.length]} ${i}`,
+        },
+        { source: 'upload', aiStatus: 'done' }
+      );
+    }
+  })();
+  const timings: number[] = [];
+  let perfHit = false;
+  for (const q of ['kangaroo', 'phieu bao hanh', 'gia dinh', 'hoa don', 'xe may 12']) {
+    const t0 = process.hrtime.bigint();
+    const r = db.searchMedia(q);
+    timings.push(Number(process.hrtime.bigint() - t0) / 1e6);
+    if (q === 'kangaroo') perfHit = r.some(i => i.id === 'perf-4321');
+  }
+  db.closeDatabase();
+  const worst = Math.max(...timings);
+  record(
+    '8',
+    'Tìm trong thư viện 5.000 ảnh dưới 100 ms',
+    perfHit && worst < 100,
+    `5 truy vấn: ${timings.map(t => t.toFixed(1)).join(', ')} ms (chậm nhất ${worst.toFixed(1)} ms); "kangaroo" ${perfHit ? 'tìm đúng ảnh' : 'KHÔNG thấy'}`
+  );
 }
 
 main()

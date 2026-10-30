@@ -73,6 +73,20 @@ Script tự dựng một server riêng (cổng 3191, thư mục dữ liệu tạ
 
 Codespaces đặt sẵn `AUTH_DISABLED=true` (xem `.devcontainer/devcontainer.json`) để Ban Giám Khảo dùng thử mà không cần tài khoản Google của chủ sở hữu. Cổng chuyển tiếp của Codespaces là riêng tư theo mặc định, và server vẫn chỉ lắng nghe trên `127.0.0.1` bên trong container.
 
+## 🗂️ Dữ liệu & hàng đợi AI
+
+* **SQLite:** thư viện nằm trong `data/mediavault.db` (better-sqlite3, chế độ WAL). Lần đầu chạy bản mới, server tự chuyển `library_index.json`, `trash_index.json` và `library_roots.json` sang SQLite rồi đổi tên các file cũ thành `.bak`. Có thể chạy riêng bước này bằng `npm run db:migrate`.
+* **Upload không phải chờ AI:** ảnh được lưu, đọc EXIF, đổi HEIC rồi hiện ngay trên timeline. AI (Qwen3-VL) gắn thẻ và đọc chữ ở chế độ nền, mỗi lần một ảnh. Tắt server giữa chừng thì lần sau hàng đợi tự chạy tiếp; ảnh lỗi được thử lại tối đa 3 lần.
+* **Cài đặt → AI cục bộ:** bật/tắt tự gắn thẻ ảnh mới, chỉ chạy khi cắm sạc, tạm dừng hàng đợi, và nút "Xử lý bù" cho các ảnh chưa có thẻ. Trong trang xem ảnh có nút "Phân tích lại".
+* **Cập nhật trực tiếp:** trình duyệt nhận thẻ mới qua `GET /api/events` (Server-Sent Events); thanh trên cùng hiện "AI: còn N ảnh".
+* **Tìm kiếm:** ô tìm kiếm dùng chỉ mục FTS5 trên thẻ, vật thể, chữ OCR, địa điểm, máy ảnh và mô tả. Gõ không dấu vẫn tìm được ("dong nai" ra "Đồng Nai").
+
+Kiểm thử hàng đợi (dùng một AI giả, không cần GPU):
+
+```bash
+npm run test:queue
+```
+
 # 🚀 TỔNG QUAN DỰ ÁN: MEDIAVAULT
 
 **Định vị:** Nền tảng Đám mây Đa phương tiện Tự lưu trữ (High-Density Self-Hosted Media Cloud) tích hợp AI cục bộ và Mạng lưới Zero-Trust.
@@ -108,12 +122,12 @@ MediaVault hoạt động như một hệ sinh thái khép kín với 4 trụ c�
 **A. Động cơ Trí tuệ Nhân tạo (AI Engine)**
 
 * **Bản Demo Hackathon (đã chạy AI cục bộ thật):** Dùng một mô hình thị giác-ngôn ngữ duy nhất là **Qwen3-VL 4B** chạy trên **llama.cpp** ngay trong máy chủ; server tự tải và quản lý tiến trình AI (`src/services/ai_runtime.ts`, `src/services/local_ai.ts`). Mỗi ảnh (hoặc frame trích từ video bằng FFmpeg) được phân tích 2 lượt: (1) gắn thẻ & nhận diện vật thể, trả về JSON; (2) OCR giữ nguyên 100% dấu tiếng Việt và ngắt dòng. Ảnh không bao giờ rời khỏi máy, không cần API key, không phụ thuộc dịch vụ AI đám mây. Ưu điểm: Quyền riêng tư tuyệt đối, OCR tiếng Việt tốt hơn hẳn các engine OCR truyền thống.
-* **Sản phẩm thực tế (Real App):** Giữ nguyên kiến trúc AI cục bộ nhưng tối ưu thêm cho quy mô lớn: hàng đợi xử lý nền (job queue) để không chặn upload, chạy batch trên GPU, và có thể bổ sung model chuyên dụng nhẹ hơn (ví dụ detector ONNX) cho bước lọc nhanh trước khi gọi Qwen3-VL.
+* Ảnh được phân tích trong **hàng đợi chạy nền** (lưu trong SQLite): upload trả về ngay, AI gắn thẻ dần từng ảnh và đẩy kết quả về trình duyệt qua Server-Sent Events.
+* **Sản phẩm thực tế (Real App):** Giữ nguyên kiến trúc AI cục bộ nhưng tối ưu thêm cho quy mô lớn: chạy batch trên GPU, và có thể bổ sung model chuyên dụng nhẹ hơn (ví dụ detector ONNX) cho bước lọc nhanh trước khi gọi Qwen3-VL.
 
 **B. Cơ sở dữ liệu (Database & Indexing)**
 
-* **Sản phẩm thực tế (Real App):** Sử dụng **SQLite3 ở chế độ WAL (Write-Ahead Logging)** kết hợp với chỉ mục FTS5. Kiến trúc này cho phép xử lý đồng thời (concurrent) hàng chục ngàn file, cho tốc độ tìm kiếm full-text search siêu tốc mà không bị kẹt I/O lock.
-* **Bản Demo Hackathon:** Sử dụng file **JSON tĩnh** (`library_index.json`). JSON giúp việc debug, show cấu trúc dữ liệu minh bạch cho giám khảo xem theo thời gian thực (Real-time data flow), chứng minh hệ thống bắt lỗi trùng lặp và lưu trữ file vật lý thật trên ổ cứng (chứ không phải URL mạng ba xạo) cực kỳ trực quan.
+* **Bản Demo Hackathon (đã dùng như bản thực tế):** **SQLite3 ở chế độ WAL** (`data/mediavault.db`) kết hợp với chỉ mục **FTS5**. Mọi thao tác ghi đi qua một module duy nhất nên không còn lỗi mất dữ liệu khi nhiều luồng cùng ghi; tìm kiếm trên 5.000 ảnh mất vài mili giây.
 
 **C. Xử lý Vị trí (Reverse Geocoding)**
 
@@ -121,4 +135,4 @@ MediaVault hoạt động như một hệ sinh thái khép kín với 4 trụ c�
 
 ---
 
-**Tóm lại:** Bản Demo là một "Mô hình thu nhỏ" hoàn hảo. Nó giữ nguyên cốt lõi lưu trữ vật lý thực tế, bảo mật Tailscale thực tế, xử lý file FFmpeg thực tế, và AI chạy 100% cục bộ bằng Qwen3-VL trên llama.cpp tự quản lý, không gửi bất kỳ dữ liệu nào lên Cloud AI. Điểm khác biệt duy nhất so với bản Production là tầng lưu chỉ mục (JSON thay vì SQLite).
+**Tóm lại:** Bản Demo là một "Mô hình thu nhỏ" hoàn hảo. Nó giữ nguyên cốt lõi lưu trữ vật lý thực tế, bảo mật Tailscale thực tế, xử lý file FFmpeg thực tế, và AI chạy 100% cục bộ bằng Qwen3-VL trên llama.cpp tự quản lý trong một hàng đợi nền, với chỉ mục SQLite + FTS5, không gửi bất kỳ dữ liệu nào lên Cloud AI.

@@ -1,10 +1,11 @@
 import 'dotenv/config';
 import heicConvert from 'heic-convert';
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { exec, execSync } from 'child_process';
+import { execFile, execFileSync, execSync } from 'child_process';
 import util from 'util';
 import ffmpegPath from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
@@ -14,6 +15,9 @@ import { createServer as createViteServer } from 'vite';
 import { INITIAL_MEDIA } from './src/data/mockMedia';
 import { analyzeMediaHybrid } from './src/services/local_ai.ts';
 import { startAiRuntime, aiStatus } from './src/services/ai_runtime.ts';
+import { authRouter, requireAuth } from './src/server/auth.ts';
+import { PathError, isInside, safeFilename, sanitizeUploadName, validateLibraryRoot } from './src/server/safePath.ts';
+import { audit, configureAudit } from './src/server/audit.ts';
 
 // Patch exifr parser limitation for modern HEIF/HEIC/AVIF files with header > 50 bytes
 try {
@@ -162,21 +166,64 @@ export async function convertHeicToJpegWithExif(heicBufferOrPath: Buffer | strin
 
 
 
+/**
+ * Keeps data out of the dev server: Vite serves any file under the project root
+ * (and /@fs/ paths), which would expose uploads, indexes, logs and keys without a session.
+ */
+function blockPrivateFiles(dataDir: string): express.RequestHandler {
+  const projectRoot = process.cwd();
+  const names = ['media_uploads', 'library_index.json', 'trash_index.json', 'library_roots.json', '.ai_runtime', 'models', 'logs', 'data'];
+  const privatePaths = [...new Set([projectRoot, dataDir])].flatMap(base => names.map(n => path.join(base, n)));
+  const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+  return (req, res, next) => {
+    if (req.path.startsWith('/api/') || req.path.startsWith('/media/')) return next();
+    let p: string;
+    try {
+      p = decodeURIComponent(req.path).replace(/\\/g, '/');
+    } catch {
+      return res.status(400).end();
+    }
+    const abs = p.startsWith('/@fs/')
+      ? path.resolve(p.slice(4).replace(/^\/([A-Za-z]:)/, '$1'))
+      : path.resolve(projectRoot, '.' + path.posix.normalize(p));
+    const blocked =
+      path.basename(abs).toLowerCase().startsWith('.env') ||
+      privatePaths.some(priv => same(abs, priv) || isInside(abs, priv));
+    if (blocked) return res.status(404).end();
+    next();
+  };
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: '50mb' }));
-
   // Directories & index paths
-  const mediaDir = path.join(process.cwd(), 'media_uploads');
-  const INDEX_FILE = path.join(process.cwd(), 'library_index.json');
-  const TRASH_FILE = path.join(process.cwd(), 'trash_index.json');
+  const DATA_DIR = path.resolve(process.env.DATA_DIR || process.cwd());
+  const mediaDir = path.join(DATA_DIR, 'media_uploads');
+  const INDEX_FILE = path.join(DATA_DIR, 'library_index.json');
+  const TRASH_FILE = path.join(DATA_DIR, 'trash_index.json');
+  const ROOTS_FILE = path.join(DATA_DIR, 'library_roots.json');
+  configureAudit(DATA_DIR);
 
   if (!fs.existsSync(mediaDir)) {
     fs.mkdirSync(mediaDir, { recursive: true });
   }
-  app.use('/media', express.static(mediaDir));
+
+  // ── Access control ────────────────────────────────────────────────────────
+  // Public: the auth endpoints, a bare health check and the SPA shell (login screen).
+  // Everything else under /api and /media needs the owner's session.
+  app.use(cookieParser());
+  app.use(blockPrivateFiles(DATA_DIR));
+  app.use('/api/auth', authRouter);
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok' });
+  });
+  app.use('/api', requireAuth);
+  // Parse JSON only after auth so anonymous requests can't make the server buffer large bodies.
+  app.use(express.json({ limit: '50mb' }));
+  app.use('/media', requireAuth, express.static(mediaDir, { dotfiles: 'deny', index: false }));
 
   // Sync / ensure existing converted JPEGs have embedded EXIF transferred from originals
   // (async () => {
@@ -213,10 +260,68 @@ async function startServer() {
       cb(null, mediaDir);
     },
     filename: (req, file, cb) => {
-      cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9) + '-' + file.originalname);
+      cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9) + '-' + sanitizeUploadName(file.originalname));
     }
   });
   const upload = multer({ storage });
+
+  // Folders registered through the library scanner; files inside them may be served but never deleted.
+  const getLibraryRoots = (): string[] => {
+    try {
+      const roots = JSON.parse(fs.readFileSync(ROOTS_FILE, 'utf-8'));
+      return Array.isArray(roots) ? roots.filter((r: unknown) => typeof r === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const addLibraryRoot = (root: string) => {
+    const roots = getLibraryRoots();
+    if (!roots.some(r => path.resolve(r).toLowerCase() === path.resolve(root).toLowerCase())) {
+      fs.writeFileSync(ROOTS_FILE, JSON.stringify([...roots, root], null, 2));
+    }
+  };
+
+  /** A file may be streamed only from media_uploads or a registered library folder. */
+  const isServable = (filePath: string) =>
+    isInside(filePath, mediaDir) || getLibraryRoots().some(root => isInside(filePath, root));
+
+  /**
+   * Deletes the stored copy of an item when it lives in media_uploads.
+   * Originals in scanned library folders are never touched: they only leave the index.
+   */
+  const deleteStoredFiles = (filename: string, item: any): 'deleted' | 'index-only' | 'missing' => {
+    const candidate = item?.path ? path.resolve(item.path) : path.join(mediaDir, filename);
+    let result: 'deleted' | 'index-only' | 'missing' = 'missing';
+    if (isInside(candidate, mediaDir)) {
+      if (fs.existsSync(candidate)) {
+        fs.unlinkSync(candidate);
+        result = 'deleted';
+      }
+    } else {
+      result = 'index-only';
+    }
+    if (item?.originalHeicUrl) {
+      const heicPath = path.join(mediaDir, 'heic_originals', path.basename(item.originalHeicUrl));
+      if (isInside(heicPath, mediaDir) && fs.existsSync(heicPath)) fs.unlinkSync(heicPath);
+    }
+    return result;
+  };
+
+  /** Validates every filename in a request body; responds 400 and returns null on the first bad one. */
+  const readFilenames = (req: express.Request, res: express.Response): string[] | null => {
+    const filenames = req.body?.filenames;
+    if (!Array.isArray(filenames)) {
+      res.status(400).json({ success: false, error: 'Expected array' });
+      return null;
+    }
+    try {
+      return filenames.map(safeFilename);
+    } catch {
+      res.status(400).json({ success: false, error: 'invalid filename' });
+      return null;
+    }
+  };
 
   const getLibraryIndex = (): any[] => {
     if (fs.existsSync(INDEX_FILE)) {
@@ -257,7 +362,7 @@ async function startServer() {
   };
 
   // In-memory runtime state for self-hosted backend simulation
-  let currentLibraryPath = 'D:\\GiaDinh\\HinhAnh';
+  let currentLibraryPath = getLibraryRoots().at(-1) || 'D:\\GiaDinh\\HinhAnh';
   let isScanning = false;
   let scanProgress = {
     isScanning: false,
@@ -269,18 +374,7 @@ async function startServer() {
     logMessages: [] as string[]
   };
 
-  // API Routes
-  app.get('/api/health', (req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'MediaVault Self-Hosted Core',
-      version: '2.4.0-fastapi-node-bridge',
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString(),
-      ai: aiStatus
-    });
-  });
-
+  // API Routes (all behind requireAuth)
   app.get('/api/system', async (req, res) => {
     let gpuName = 'NVENC / QuickSync';
     try { gpuName = execSync('wmic.exe path win32_VideoController get name', { stdio: 'ignore' }).toString().split('\n')[1].trim(); } catch (e) { }
@@ -346,18 +440,22 @@ async function startServer() {
         gpuName,
         uptime: os.uptime(),
         hwAccelEngine: 'Intel QuickSync / NVENC Active',
-        drives
+        drives,
+        processUptime: process.uptime(),
+        ai: aiStatus
       }
     });
   });
 
-  app.get('/api/serve-media', (req, res) => {
-    const filePath = req.query.path;
-    if (typeof filePath === 'string' && fs.existsSync(filePath)) {
-      res.sendFile(filePath);
-    } else {
-      res.status(404).send('Not found');
+  // Streams an indexed file (e.g. from a scanned library folder) after checking it is inside an allowed folder.
+  app.get('/api/media/:id/file', (req, res) => {
+    const item = getLibraryIndex().find(i => i.id === req.params.id);
+    if (!item || typeof item.path !== 'string') return res.status(404).json({ success: false, error: 'Not found' });
+    const filePath = path.resolve(item.path);
+    if (!isServable(filePath) || !fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, error: 'Not found' });
     }
+    res.sendFile(filePath, { dotfiles: 'deny' });
   });
 
   app.get('/api/media', async (req, res) => {
@@ -365,11 +463,20 @@ async function startServer() {
       let indexedItems = getLibraryIndex();
       const trashedItems = getTrashIndex();
 
+      // Drop index entries whose file is gone. Scanned items live outside media_uploads, so check their own path.
       let indexModified = false;
       indexedItems = indexedItems.filter(item => {
-        if (fs.existsSync(path.join(mediaDir, item.filename))) return true;
+        const stored = typeof item.path === 'string' && isServable(path.resolve(item.path)) && fs.existsSync(item.path);
+        if (stored || fs.existsSync(path.join(mediaDir, item.filename))) return true;
         indexModified = true;
         return false;
+      });
+      // Older scans pointed at the removed /api/serve-media route.
+      indexedItems.forEach(item => {
+        if (typeof item.url === 'string' && item.url.startsWith('/api/serve-media')) {
+          item.url = item.thumbnailUrl = `/api/media/${item.id}/file`;
+          indexModified = true;
+        }
       });
       if (indexModified) saveLibraryIndex(indexedItems);
 
@@ -499,9 +606,15 @@ async function startServer() {
   });
 
   app.post('/api/config', (req, res) => {
-    const { libraryPath } = req.body;
-    if (libraryPath) {
-      currentLibraryPath = libraryPath;
+    const { libraryPath } = req.body || {};
+    if (libraryPath !== undefined) {
+      try {
+        currentLibraryPath = validateLibraryRoot(libraryPath);
+        addLibraryRoot(currentLibraryPath);
+      } catch (err) {
+        if (err instanceof PathError) return res.status(400).json({ success: false, error: err.message });
+        throw err;
+      }
     }
     res.json({ success: true, libraryPath: currentLibraryPath });
   });
@@ -543,7 +656,7 @@ async function startServer() {
         }
       } else {
         try {
-          const ffprobeRaw = execSync(`"${ffprobeStatic.path}" -v quiet -print_format json -show_format -show_streams "${filePath}"`).toString();
+          const ffprobeRaw = execFileSync(ffprobeStatic.path, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath]).toString();
           const ffprobeData = JSON.parse(ffprobeRaw);
 
           const tags = { ...(ffprobeData?.streams?.[0]?.tags || {}), ...(ffprobeData?.format?.tags || {}) };
@@ -659,7 +772,7 @@ async function startServer() {
           const vaultDir = path.join(mediaDir, 'heic_originals');
           if (!fs.existsSync(vaultDir)) fs.mkdirSync(vaultDir, { recursive: true });
 
-          const safeHeicPath = path.join(vaultDir, `${Date.now()}-${file.originalname}`);
+          const safeHeicPath = path.join(vaultDir, `${Date.now()}-${sanitizeUploadName(file.originalname)}`);
           fs.copyFileSync(filePath, safeHeicPath);
 
           const jpgBufferWithExif = await convertHeicToJpegWithExif(filePath, 0.88);
@@ -690,13 +803,14 @@ async function startServer() {
           base64Data = fs.readFileSync(filePath).toString('base64');
         } else {
           try {
-            const execAsync = util.promisify(exec);
+            // execFile passes arguments without a shell, so filenames can't inject commands.
+            const execFileAsync = util.promisify(execFile);
             try {
               // Try extracting at 1 second
-              await execAsync(`"${ffmpegPath}" -y -ss 00:00:01 -i "${filePath}" -vframes 1 "${tempFramePath}"`);
+              await execFileAsync(ffmpegPath as unknown as string, ['-y', '-ss', '00:00:01', '-i', filePath, '-vframes', '1', tempFramePath]);
             } catch (err) {
               // Fallback to 0 seconds if video is too short
-              await execAsync(`"${ffmpegPath}" -y -ss 00:00:00 -i "${filePath}" -vframes 1 "${tempFramePath}"`);
+              await execFileAsync(ffmpegPath as unknown as string, ['-y', '-ss', '00:00:00', '-i', filePath, '-vframes', '1', tempFramePath]);
             }
             if (fs.existsSync(tempFramePath)) {
               const stat = fs.statSync(tempFramePath);
@@ -707,7 +821,6 @@ async function startServer() {
                 base64Data = buffer.toString('base64');
                 console.log(`[FFmpeg→AI] Buffer ready: ${buffer.length} bytes, base64 length: ${base64Data.length}`);
                 mimeType = 'image/jpeg';
-                previewUrl = '/media_uploads/' + path.basename(tempFramePath);
               } else {
                 console.warn('[FFmpeg] Frame file exists but is 0 bytes — FFmpeg may have failed silently.');
               }
@@ -829,164 +942,122 @@ async function startServer() {
     res.json({ success: true, items: processedItems });
   });
 
-  app.post('/api/media/trash', express.json(), (req, res) => {
-    const filenames = req.body.filenames;
-    if (!Array.isArray(filenames)) return res.status(400).json({ success: false, error: 'Expected array' });
+  app.post('/api/media/trash', (req, res) => {
+    const filenames = readFilenames(req, res);
+    if (!filenames) return;
     let trashed = getTrashIndex();
     for (const f of filenames) {
       if (!trashed.includes(f)) trashed.push(f);
     }
     saveTrashIndex(trashed);
+    audit(req.user!.email, 'trash', filenames);
     res.json({ success: true, message: 'Trashed' });
   });
 
-  app.post('/api/media/restore', express.json(), (req, res) => {
-    const filenames = req.body.filenames;
-    if (!Array.isArray(filenames)) return res.status(400).json({ success: false, error: 'Expected array' });
+  app.post('/api/media/restore', (req, res) => {
+    const filenames = readFilenames(req, res);
+    if (!filenames) return;
     let trashed = getTrashIndex();
     trashed = trashed.filter(f => !filenames.includes(f));
     saveTrashIndex(trashed);
+    audit(req.user!.email, 'restore', filenames);
     res.json({ success: true, message: 'Restored' });
   });
 
-  app.patch('/api/media', express.json(), (req, res) => {
-    const updatedItem = req.body.item;
-    if (!updatedItem || !updatedItem.filename) return res.status(400).json({ success: false, error: 'Expected item with filename' });
+  // Fields only the server may set: where a file lives and how it is served.
+  const SERVER_OWNED_FIELDS = ['id', 'filename', 'path', 'url', 'thumbnailUrl', 'previewUrl', 'originalHeicUrl', 'isDeleted'];
+
+  app.patch('/api/media', (req, res) => {
+    const updatedItem = req.body?.item;
+    if (!updatedItem || typeof updatedItem !== 'object') {
+      return res.status(400).json({ success: false, error: 'Expected item with filename' });
+    }
+    let filename: string;
+    try {
+      filename = safeFilename(updatedItem.filename);
+    } catch {
+      return res.status(400).json({ success: false, error: 'invalid filename' });
+    }
+    const changes = Object.fromEntries(Object.entries(updatedItem).filter(([key]) => !SERVER_OWNED_FIELDS.includes(key)));
 
     const indexedItems = getLibraryIndex();
-    const existingIdx = indexedItems.findIndex(i => i.filename === updatedItem.filename);
+    const existingIdx = indexedItems.findIndex(i => i.filename === filename);
     if (existingIdx !== -1) {
-      indexedItems[existingIdx] = { ...indexedItems[existingIdx], ...updatedItem };
+      indexedItems[existingIdx] = { ...indexedItems[existingIdx], ...changes };
     } else {
-      indexedItems.push(updatedItem);
+      // Uploads listed from media_uploads but not indexed yet get a server-built entry.
+      const storedPath = path.join(mediaDir, filename);
+      if (!fs.existsSync(storedPath)) return res.status(404).json({ success: false, error: 'Not found' });
+      indexedItems.push({
+        ...changes,
+        id: typeof updatedItem.id === 'string' ? updatedItem.id.slice(0, 120) : `upload-${Date.now()}`,
+        filename,
+        path: storedPath,
+        url: `/media/${filename}`,
+        thumbnailUrl: `/media/${filename}`,
+      });
     }
 
     saveLibraryIndex(indexedItems);
     res.json({ success: true, message: 'Updated successfully' });
   });
 
-  app.delete('/api/media/trash/empty', express.json(), (req, res) => {
-    try {
-      const trashedFilenames = getTrashIndex();
-      let indexedItems = getLibraryIndex();
-      let deletedCount = 0;
-
-      for (const f of trashedFilenames) {
-        const item = indexedItems.find(i => i.filename === f);
-        const physicalPath = (item && item.path && fs.existsSync(item.path)) ? item.path : path.join(mediaDir, f);
-
-        try {
-          if (fs.existsSync(physicalPath)) {
-            fs.unlinkSync(physicalPath);
-          }
-          if (item?.originalHeicUrl) {
-            const heicFilename = path.basename(item.originalHeicUrl);
-            const heicPath = path.join(mediaDir, 'heic_originals', heicFilename);
-            if (fs.existsSync(heicPath)) fs.unlinkSync(heicPath);
-          }
-        } catch (e) {
-          console.error(`Failed to physically delete ${f}:`, e);
-        }
-        deletedCount++;
+  /** Removes items from disk (media_uploads only), the index and the trash list, then audits it. */
+  const deleteItems = (email: string, action: string, filenames: string[]) => {
+    const indexedItems = getLibraryIndex();
+    const deleted: string[] = [];
+    const indexOnly: string[] = [];
+    for (const f of filenames) {
+      const item = indexedItems.find(i => i.filename === f);
+      try {
+        const result = deleteStoredFiles(f, item);
+        if (result === 'deleted') deleted.push(f);
+        if (result === 'index-only') indexOnly.push(f);
+      } catch (e) {
+        console.error(`Failed to delete ${f}:`, e);
       }
+    }
+    saveLibraryIndex(indexedItems.filter(item => !filenames.includes(item.filename)));
+    saveTrashIndex(getTrashIndex().filter(f => !filenames.includes(f)));
+    audit(email, action, filenames, indexOnly.length ? `kept originals: ${JSON.stringify(indexOnly)}` : '');
+    return { deleted, indexOnly };
+  };
 
-      indexedItems = indexedItems.filter(item => !trashedFilenames.includes(item.filename));
-      saveLibraryIndex(indexedItems);
+  app.delete('/api/media/trash/empty', (req, res) => {
+    try {
+      const trashedFilenames = getTrashIndex().filter(f => {
+        try {
+          safeFilename(f);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      const { deleted, indexOnly } = deleteItems(req.user!.email, 'empty-trash', trashedFilenames);
       saveTrashIndex([]);
-
-      res.json({ success: true, deletedCount });
+      res.json({ success: true, deletedCount: deleted.length + indexOnly.length });
     } catch (err: any) {
       console.error('Failed to empty trash:', err);
       res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  app.delete('/api/media', express.json(), (req, res) => {
-    const filenames = req.body.filenames;
-    if (!Array.isArray(filenames)) return res.status(400).json({ success: false, error: 'Expected array' });
-
-    const indexedItems = getLibraryIndex();
-    let deletedCount = 0;
-
-    for (const f of filenames) {
-      const item = indexedItems.find(i => i.filename === f);
-      const physicalPath = (item && item.path && fs.existsSync(item.path)) ? item.path : path.join(mediaDir, f);
-      try {
-        if (fs.existsSync(physicalPath)) {
-          fs.unlinkSync(physicalPath);
-          deletedCount++;
-        }
-      } catch (e) {
-        console.error('Failed to unlink:', physicalPath, e);
-      }
-      // Also purge the HEIC vault original to prevent ghost files
-      if (item?.originalHeicUrl) {
-        try {
-          const heicPath = path.join(mediaDir, 'heic_originals', path.basename(item.originalHeicUrl));
-          if (fs.existsSync(heicPath)) fs.unlinkSync(heicPath);
-        } catch (e) {
-          console.error('Failed to unlink HEIC vault file:', e);
-        }
-      }
-    }
-
-    // Remove deleted files from library_index.json
-    const newIndexed = indexedItems.filter(item => !filenames.includes(item.filename));
-    saveLibraryIndex(newIndexed);
-
-    // Remove deleted files from trash_index.json
-    let trashed = getTrashIndex();
-    trashed = trashed.filter(f => !filenames.includes(f));
-    saveTrashIndex(trashed);
-
-    res.json({ success: true, deleted: deletedCount });
+  app.delete('/api/media', (req, res) => {
+    const filenames = readFilenames(req, res);
+    if (!filenames) return;
+    const { deleted } = deleteItems(req.user!.email, 'delete', filenames);
+    res.json({ success: true, deleted: deleted.length });
   });
 
   app.delete('/api/media/:filename', (req, res) => {
-    const filename = req.params.filename;
-    if (!filename) {
-      return res.status(400).json({ success: false, error: 'Filename is required' });
-    }
-
-    let filePath = path.join(mediaDir, filename);
-    const indexedItems = getLibraryIndex();
-    const item = indexedItems.find(i => i.filename === filename);
-    if (item && item.path && fs.existsSync(item.path)) {
-      filePath = item.path;
-    }
-
-    // Remove from library_index.json
-    const newIndexed = indexedItems.filter(i => i.filename !== filename);
-    saveLibraryIndex(newIndexed);
-
-    // Remove from trash_index.json
-    let trashed = getTrashIndex();
-    if (trashed.includes(filename)) {
-      trashed = trashed.filter(f => f !== filename);
-      saveTrashIndex(trashed);
-    }
-
-    // Also purge the HEIC vault original
-    if (item?.originalHeicUrl) {
-      try {
-        const heicPath = path.join(mediaDir, 'heic_originals', path.basename(item.originalHeicUrl));
-        if (fs.existsSync(heicPath)) fs.unlinkSync(heicPath);
-      } catch (e) {
-        console.error('Failed to unlink HEIC vault file:', e);
-      }
-    }
-
+    let filename: string;
     try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        res.json({ success: true, message: 'File deleted' });
-      } else {
-        res.json({ success: true, message: 'File removed from index' });
-      }
-    } catch (err) {
-      console.error('Failed to delete file:', err);
-      res.status(500).json({ success: false, error: 'Failed to delete file' });
+      filename = safeFilename(req.params.filename);
+    } catch {
+      return res.status(400).json({ success: false, error: 'invalid filename' });
     }
+    const { deleted } = deleteItems(req.user!.email, 'delete', [filename]);
+    res.json({ success: true, message: deleted.length ? 'File deleted' : 'File removed from index' });
   });
 
   app.get('/api/scan/status', (req, res) => {
@@ -994,9 +1065,13 @@ async function startServer() {
   });
 
   app.post('/api/scan/start', async (req, res) => {
-    const { path: targetPath } = req.body;
-    if (targetPath) {
-      currentLibraryPath = targetPath;
+    const { path: targetPath } = req.body || {};
+    try {
+      currentLibraryPath = validateLibraryRoot(targetPath ?? currentLibraryPath);
+      addLibraryRoot(currentLibraryPath);
+    } catch (err) {
+      if (err instanceof PathError) return res.status(400).json({ success: false, error: err.message });
+      throw err;
     }
 
     if (isScanning) {
@@ -1051,13 +1126,14 @@ async function startServer() {
                   lng = realExif.longitude;
                 }
 
+                const id = `media-idx-${Date.now()}-${Math.random().toString(36).substring(7)}`;
                 const newItem = {
-                  id: `media-idx-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+                  id,
                   title: file,
                   filename: file,
                   path: srcPath,
-                  url: `/api/serve-media?path=${encodeURIComponent(srcPath)}`,
-                  thumbnailUrl: `/api/serve-media?path=${encodeURIComponent(srcPath)}`,
+                  url: `/api/media/${id}/file`,
+                  thumbnailUrl: `/api/media/${id}/file`,
                   type: isVideo ? 'video' : 'image',
                   date: dateInfo.date,
                   dateFormatted: dateInfo.dateFormatted,
@@ -1100,6 +1176,11 @@ async function startServer() {
     isScanning = false;
 
     res.json({ success: true, message: 'Scan complete', progress: scanProgress });
+  });
+
+  // Unknown API routes stop here instead of falling through to the SPA shell.
+  app.use('/api', (req, res) => {
+    res.status(404).json({ success: false, error: 'Not found' });
   });
 
   // Vite middleware for development

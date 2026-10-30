@@ -14,8 +14,9 @@ coverage/
 /playwright/.cache/
 /playwright/.auth/
 
-# ONNX models (downloaded at setup)
-models/*.onnx
+# Local AI runtime & model weights (auto-downloaded on first run)
+models/
+.ai_runtime/
 
 # Media uploads & local test data
 media_uploads/

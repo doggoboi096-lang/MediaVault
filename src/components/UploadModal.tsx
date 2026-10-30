@@ -188,7 +188,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           ) : (
             <div className="bg-[#0C0C0C] font-mono text-[13px] text-gray-300 p-4 rounded text-left overflow-y-auto h-40 w-full">
               <div>
-                <span className="text-green-500">user@DESKTOP-9K3BEP7</span>:<span className="text-blue-400">/mnt/c/Users/user/Desktop/mediavault</span>$ Attempting AI analysis with model: gemini-3.7-flash
+                <span className="text-green-500">user@DESKTOP-9K3BEP7</span>:<span className="text-blue-400">/mnt/c/Users/user/Desktop/mediavault</span>$ Running local AI analysis with model: Qwen3-VL 4B (llama.cpp local)
               </div>
               {terminalLines.map((line, idx) => (
                 <div key={idx} className="mt-1">{line}</div>

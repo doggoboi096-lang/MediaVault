@@ -164,8 +164,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <p className="text-[11px] text-zinc-500">{t('edgeBasedObject')}</p>
               </div>
             </div>
-            <span className="text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-semibold">
-              Simulated via Gemini
+            <span className="text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded font-semibold">
+              Local via llama.cpp
             </span>
           </div>
 
@@ -188,7 +188,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="space-y-1.5 pt-2 border-t border-zinc-800/80 text-[11px]">
               <div className="flex justify-between text-zinc-400">
                 <span className="text-zinc-500">{t('modelArch')}</span>
-                <span className="font-mono text-emerald-400 font-semibold">{hwStatus.yoloEngine} <span className="text-amber-400 text-[10px] font-normal">(Gemini Sim)</span></span>
+                <span className="font-mono text-emerald-400 font-semibold">Qwen3-VL 4B <span className="text-zinc-500 text-[10px] font-normal">(llama.cpp Local)</span></span>
               </div>
               <div className="flex justify-between text-zinc-400">
                 <span className="text-zinc-500">{t('avgLatency')}</span>
@@ -196,7 +196,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
               <div className="flex justify-between text-zinc-400">
                 <span className="text-zinc-500">{t('ocrPipeline')}</span>
-                <span className="font-mono text-zinc-200">PaddleOCR + Tesseract 5</span>
+                <span className="font-mono text-zinc-200">Qwen3-VL Native OCR</span>
               </div>
             </div>
           </div>

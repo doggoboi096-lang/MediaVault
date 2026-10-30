@@ -13,6 +13,7 @@ import exifr from 'exifr';
 import { createServer as createViteServer } from 'vite';
 import { INITIAL_MEDIA } from './src/data/mockMedia';
 import { analyzeMediaHybrid } from './src/services/local_ai.ts';
+import { startAiRuntime, aiStatus } from './src/services/ai_runtime.ts';
 
 // Patch exifr parser limitation for modern HEIF/HEIC/AVIF files with header > 50 bytes
 try {
@@ -275,7 +276,8 @@ async function startServer() {
       service: 'MediaVault Self-Hosted Core',
       version: '2.4.0-fastapi-node-bridge',
       uptime: process.uptime(),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      ai: aiStatus
     });
   });
 
@@ -725,7 +727,7 @@ async function startServer() {
           exif: { camera: '', lens: '', aperture: '', shutter: '', iso: 0 }
         };
 
-        // Hybrid AI: Ollama Qwen-VL (vision)
+        // Hybrid AI: Qwen3-VL on the self-managed llama.cpp runtime (vision + OCR)
         const analysisImagePath = tempFrameCreated ? tempFramePath : filePath;
         try {
           if (isVideo && !base64Data) {
@@ -1117,6 +1119,8 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`MediaVault server listening at http://0.0.0.0:${PORT}`);
+    // Boot the local AI runtime in the background; uploads wait for it via analyzeMediaHybrid.
+    startAiRuntime().catch(() => { /* status already logged; retried on next upload */ });
   });
 }
 

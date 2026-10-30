@@ -1,6 +1,21 @@
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/doggoboi096-lang/MediaVault-AIRiser2026)
 
-Lưu ý cho Ban Giám Khảo: Để bảo mật an toàn thông tin, dự án không đính kèm file .env trên GitHub. Khi môi trường Codespaces mở ra, vui lòng tạo một file .env (dựa trên cấu trúc của .env.example) và điền API Key Gemini của bạn vào để tính năng AI hoạt động.
+Lưu ý cho Ban Giám Khảo: Toàn bộ AI của MediaVault chạy cục bộ với model **Qwen3-VL 4B** trên **llama.cpp**, do chính server tự tải và tự khởi động. Dự án **không dùng bất kỳ API key hay dịch vụ AI đám mây nào**, và **không cần cài Ollama** hay phần mềm AI nào khác. Chỉ cần:
+
+```bash
+npm install
+npm run dev
+```
+
+Lần chạy đầu tiên, server tự tải về (khoảng 3 GB, chỉ tải một lần):
+* `llama-server` bản chính thức từ [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp/releases) vào `.ai_runtime/` (Windows dùng bản Vulkan, chạy được trên GPU NVIDIA/AMD/Intel).
+* Model `Qwen3VL-4B-Instruct-Q4_K_M.gguf` (2.5 GB) và `mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf` (0.45 GB) từ [Qwen/Qwen3-VL-4B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF) vào `models/`.
+
+Các lần sau, model được nạp thẳng từ ổ đĩa vào GPU mỗi khi chạy `npm run dev`. Tiến trình tải/nạp hiển thị trong terminal và tại `GET /api/health` (trường `ai`). Ảnh upload trong lúc model đang nạp sẽ chờ đến khi AI sẵn sàng. Nếu AI lỗi, ảnh vẫn được lưu và đọc EXIF/GPS bình thường, chỉ thiếu tag AI và OCR.
+
+Trên máy có nhiều GPU (ví dụ laptop có cả iGPU), server tự chọn GPU rời và chạy toàn bộ model trên GPU đó; có thể chỉ định thủ công bằng `AI_DEVICE` (ví dụ `AI_DEVICE=Vulkan0`, xem danh sách bằng `llama-server --list-devices`).
+
+Tùy chọn trong `.env`: `LLAMA_BACKEND=cpu` (ép chạy CPU; Linux mặc định CPU, đặt `vulkan` để dùng GPU), `AI_PORT` (mặc định `8089`), `AI_MODEL_FILE` / `AI_MMPROJ_FILE` (đổi bản lượng tử hóa, ví dụ `Qwen3VL-4B-Instruct-Q8_0.gguf`), `LLAMA_SERVER_PATH` (dùng `llama-server` có sẵn), hoặc `AI_BASE_URL` (trỏ tới một server OpenAI-compatible đang chạy sẵn thay vì tự khởi động).
 
 # 🚀 TỔNG QUAN DỰ ÁN: MEDIAVAULT
 
@@ -36,8 +51,8 @@ MediaVault hoạt động như một hệ sinh thái khép kín với 4 trụ c�
 
 **A. Động cơ Trí tuệ Nhân tạo (AI Engine)**
 
-* **Sản phẩm thực tế (Real App):** Chạy 100% Edge AI (AI Cục bộ) với kiến trúc ONNX Runtime (sử dụng model YOLOv8-nano và PaddleOCR). Toàn bộ quá trình suy luận (Inference) xảy ra offline bằng GPU của người dùng. Ưu điểm: Đảm bảo quyền riêng tư tuyệt đối (Air-gapped).
-* **Bản Demo Hackathon:** **(Được mô phỏng qua Gemini API).** Việc setup môi trường CUDA/ONNX cục bộ rất nặng và dễ lỗi tương thích khi đem máy đi demo. Do đó, bản Demo dùng Google Gemini API (với cơ chế Fallback tự động nhảy tầng từ 3.7 -> 3.6 -> 3.5 -> 1.5) để mô phỏng lại luồng suy luận của YOLOv8. Ưu điểm: Nhanh, nhẹ, ra kết quả xuất sắc ngay lập tức để minh họa luồng UX/UI.
+* **Bản Demo Hackathon (đã chạy AI cục bộ thật):** Dùng một mô hình thị giác-ngôn ngữ duy nhất là **Qwen3-VL 4B** chạy trên **llama.cpp** ngay trong máy chủ; server tự tải và quản lý tiến trình AI (`src/services/ai_runtime.ts`, `src/services/local_ai.ts`). Mỗi ảnh (hoặc frame trích từ video bằng FFmpeg) được phân tích 2 lượt: (1) gắn thẻ & nhận diện vật thể, trả về JSON; (2) OCR giữ nguyên 100% dấu tiếng Việt và ngắt dòng. Ảnh không bao giờ rời khỏi máy, không cần API key, không phụ thuộc dịch vụ AI đám mây. Ưu điểm: Quyền riêng tư tuyệt đối, OCR tiếng Việt tốt hơn hẳn các engine OCR truyền thống.
+* **Sản phẩm thực tế (Real App):** Giữ nguyên kiến trúc AI cục bộ nhưng tối ưu thêm cho quy mô lớn: hàng đợi xử lý nền (job queue) để không chặn upload, chạy batch trên GPU, và có thể bổ sung model chuyên dụng nhẹ hơn (ví dụ detector ONNX) cho bước lọc nhanh trước khi gọi Qwen3-VL.
 
 **B. Cơ sở dữ liệu (Database & Indexing)**
 
@@ -50,4 +65,4 @@ MediaVault hoạt động như một hệ sinh thái khép kín với 4 trụ c�
 
 ---
 
-**Tóm lại:** Bản Demo là một "Mô hình thu nhỏ" hoàn hảo. Nó giữ nguyên cốt lõi lưu trữ vật lý thực tế, bảo mật Tailscale thực tế, và xử lý file FFmpeg thực tế, chỉ "vay mượn" sức mạnh của Cloud AI (Gemini) để vượt qua giới hạn phần cứng khi thuyết trình.
+**Tóm lại:** Bản Demo là một "Mô hình thu nhỏ" hoàn hảo. Nó giữ nguyên cốt lõi lưu trữ vật lý thực tế, bảo mật Tailscale thực tế, xử lý file FFmpeg thực tế, và AI chạy 100% cục bộ bằng Qwen3-VL trên llama.cpp tự quản lý, không gửi bất kỳ dữ liệu nào lên Cloud AI. Điểm khác biệt duy nhất so với bản Production là tầng lưu chỉ mục (JSON thay vì SQLite).

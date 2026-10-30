@@ -2,16 +2,78 @@
  * local_ai.ts — Unified Local AI Pipeline (Qwen3-VL 4B)
  *
  * All vision understanding, tagging, object detection, and high-fidelity
- * Vietnamese/multilingual OCR text extraction are unified into Qwen3-VL 4B via Ollama.
+ * Vietnamese/multilingual OCR text extraction are unified into Qwen3-VL 4B,
+ * served by the self-managed llama.cpp runtime in ai_runtime.ts.
  *
  * Single entry-point: analyzeMediaHybrid(imagePath, base64Image)
  */
 
 import sharp from 'sharp';
+import { AI_BASE_URL, startAiRuntime } from './ai_runtime';
 
-// ── Ollama config ───────────────────────────────────────────────────────────
-const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3-vl:4b-instruct';
+// ── Sampling presets ────────────────────────────────────────────────────────
+// Near-greedy decoding keeps the JSON tagging output stable.
+const SAMPLING_JSON = { temperature: 0.1, repeat_penalty: 1.05 };
+// Qwen's recommended Qwen3-VL Instruct sampling; greedy decoding loops on dense screenshots.
+const SAMPLING_OCR = { temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty: 1.5 };
+
+// ── llama-server chat call (OpenAI-compatible) ──────────────────────────────
+async function chatWithImage(
+  prompt: string,
+  base64Jpeg: string,
+  opts: { maxTokens: number; json?: boolean; sampling: Record<string, number> }
+): Promise<{ text: string; truncated: boolean }> {
+  await startAiRuntime();
+
+  const payload = {
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Jpeg}` } },
+          { type: 'text', text: prompt },
+        ],
+      },
+    ],
+    ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
+    stream: false,
+    max_tokens: opts.maxTokens,
+    ...opts.sampling,
+  };
+
+  const response = await fetch(`${AI_BASE_URL}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(120_000),
+  });
+
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  const choice = data.choices?.[0];
+  return { text: choice?.message?.content || '', truncated: choice?.finish_reason === 'length' };
+}
+
+/**
+ * When OCR hits the token limit it is almost always stuck re-reading the same block.
+ * Cut at the first block of >= 3 lines that immediately repeats, dropping the loop.
+ */
+function stripRepetitionLoop(text: string): string {
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    for (let p = 3; i + 2 * p <= lines.length; p++) {
+      let repeats = true;
+      for (let k = 0; k < p; k++) {
+        if (lines[i + k] !== lines[i + p + k]) { repeats = false; break; }
+      }
+      if (repeats && lines.slice(i, i + p).some(l => l.trim())) {
+        return lines.slice(0, i + p).join('\n');
+      }
+    }
+  }
+  // No loop found: just drop the cut-off last line.
+  return lines.slice(0, -1).join('\n');
+}
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 export interface DetectedObjectLocal {
@@ -47,39 +109,14 @@ export async function analyzeVisionQwen(imageBuffer: Buffer): Promise<{
 
     const base64Image = resizedBuffer.toString('base64');
 
-    const payload = {
-      model: OLLAMA_MODEL,
-      format: 'json',
-      messages: [
-        {
-          role: 'user',
-          content:
-            'Analyze this image visually. Output a valid JSON object with exactly 2 keys: "tags" (array of descriptive string tags about the scene, subjects, and context) and "detectedObjects" (array of {label, confidence} objects for things you can see). Do NOT extract or include any text/OCR content.',
-          images: [base64Image],
-        },
-      ],
-      stream: false,
-      options: {
-        num_ctx: 8192,
-        num_predict: 1024,
-        temperature: 0.1,
-        repeat_penalty: 1.05,
-      },
-    };
-
-    const response = await fetch(`${OLLAMA_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(120_000),
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const data = await response.json();
-    let textOutput = data.message?.content || '{}';
+    let textOutput =
+      (
+        await chatWithImage(
+          'Analyze this image visually. Output a valid JSON object with exactly 2 keys: "tags" (array of descriptive string tags about the scene, subjects, and context) and "detectedObjects" (array of {label, confidence} objects for things you can see). Do NOT extract or include any text/OCR content.',
+          base64Image,
+          { maxTokens: 1024, json: true, sampling: SAMPLING_JSON }
+        )
+      ).text || '{}';
 
     // Extract JSON core, ignore markdown wrapping
     const firstBrace = textOutput.indexOf('{');
@@ -145,35 +182,12 @@ export async function extractTextQwen(imageBuffer: Buffer): Promise<string> {
 
     const base64Image = resizedBuffer.toString('base64');
 
-    const payload = {
-      model: OLLAMA_MODEL,
-      messages: [
-        {
-          role: 'user',
-          content:
-            'Trích xuất toàn bộ văn bản xuất hiện trong hình ảnh này. Giữ nguyên 100% dấu câu tiếng Việt, khoảng cách từ, và cấu trúc ngắt dòng. Không thêm bất kỳ lời dẫn hay bình luận nào.',
-          images: [base64Image],
-        },
-      ],
-      stream: false,
-      options: {
-        num_ctx: 8192,
-        num_predict: 2048,
-        temperature: 0.1,
-        repeat_penalty: 1.05,
-      },
-    };
-
-    const response = await fetch(`${OLLAMA_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(120_000),
-    });
-
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    const content = (data.message?.content || '').trim();
+    const ocr = await chatWithImage(
+      'Trích xuất toàn bộ văn bản xuất hiện trong hình ảnh này. Giữ nguyên 100% dấu câu tiếng Việt, khoảng cách từ, và cấu trúc ngắt dòng. Không thêm bất kỳ lời dẫn hay bình luận nào.',
+      base64Image,
+      { maxTokens: 2048, sampling: SAMPLING_OCR }
+    );
+    const content = (ocr.truncated ? stripRepetitionLoop(ocr.text) : ocr.text).trim();
 
     // Ignore conversational negative statements if no text is present
     const negativePhrases = [

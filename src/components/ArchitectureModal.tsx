@@ -110,12 +110,12 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({
                   <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                   {isVi ? 'Bản Demo Prototype (Dành cho Pitch)' : 'This Demo Prototype (Pitch Ready)'}
                 </span>
-                <span className="text-[10px] text-amber-400/80 font-mono font-semibold">Gemini + JSON Sim</span>
+                <span className="text-[10px] text-amber-400/80 font-mono font-semibold">Qwen3-VL Local + JSON</span>
               </div>
               <ul className="text-xs text-zinc-400 space-y-1.5">
                 <li className="flex items-start gap-1.5">
                   <span className="text-amber-400 mt-0.5">•</span>
-                  <span><strong>Simulated AI Vision:</strong> {isVi ? 'Sử dụng Google Gemini API (Structured Schema) để mô phỏng đường ống nhận diện vật thể & OCR mà không đòi hỏi GPU nặng khi chấm thi.' : 'Uses Google Gemini API structured output to simulate the AI vision & OCR pipeline smoothly without heavy local GPU requirements during pitching.'}</span>
+                  <span><strong>Local AI Vision:</strong> {isVi ? 'Mô hình Qwen3-VL 4B chạy 100% cục bộ trên llama.cpp do server tự nạp: gắn thẻ, nhận diện vật thể và OCR tiếng Việt ngay trên máy, không gửi ảnh lên bất kỳ cloud API nào.' : 'Qwen3-VL 4B runs 100% locally on a self-managed llama.cpp runtime for tagging, object detection and Vietnamese OCR, with no image ever sent to a cloud API.'}</span>
                 </li>
                 <li className="flex items-start gap-1.5">
                   <span className="text-amber-400 mt-0.5">•</span>
